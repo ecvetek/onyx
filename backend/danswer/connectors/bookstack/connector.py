@@ -19,6 +19,9 @@ from danswer.connectors.models import Section
 
 
 class BookstackConnector(LoadConnector, PollConnector):
+  
+    redacted_list = ['policies-editor', 'procedures-editor', 'processes-editor', 'isms-editor']
+
     def __init__(
         self,
         batch_size: int = INDEX_BATCH_SIZE,
@@ -78,6 +81,18 @@ class BookstackConnector(LoadConnector, PollConnector):
         updated_at_str = (
             str(book.get("updated_at")) if book.get("updated_at") is not None else None
         )
+        # change start
+        if any(ele in str(book.get("slug")) for ele in BookstackConnector.redacted_list):
+            return Document(
+                id="book__0",
+                sections=[Section(link="#", text="")],
+                source=DocumentSource.BOOKSTACK,
+                semantic_identifier="Book: REDACTED",
+                title="REDACTED",
+                doc_updated_at=None,
+                metadata={"type": "book"},
+            )
+        # change end
         return Document(
             id="book__" + str(book.get("id")),
             sections=[Section(link=url, text=text)],
@@ -107,6 +122,18 @@ class BookstackConnector(LoadConnector, PollConnector):
             if chapter.get("updated_at") is not None
             else None
         )
+        # change start
+        if any(ele in str(chapter.get("book_slug")) for ele in BookstackConnector.redacted_list):
+            return Document(
+                id="chapter__0",
+                sections=[Section(link="#", text="")],
+                source=DocumentSource.BOOKSTACK,
+                semantic_identifier="Chapter: REDACTED",
+                title="REDACTED",
+                doc_updated_at=None,
+                metadata={"type": "chapter"},
+            )
+        # change end
         return Document(
             id="chapter__" + str(chapter.get("id")),
             sections=[Section(link=url, text=text)],
@@ -131,6 +158,18 @@ class BookstackConnector(LoadConnector, PollConnector):
             if shelf.get("updated_at") is not None
             else None
         )
+        # change start
+        if any(ele in str(shelf.get("slug")) for ele in BookstackConnector.redacted_list):
+            return Document(
+                id="shelf:0",
+                sections=[Section(link="#", text="")],
+                source=DocumentSource.BOOKSTACK,
+                semantic_identifier="Shelf: REDACTED",
+                title="REDACTED",
+                doc_updated_at=None,
+                metadata={"type": "shelf"},
+            )
+        # change end
         return Document(
             id="shelf:" + str(shelf.get("id")),
             sections=[Section(link=url, text=text)],
@@ -163,7 +202,19 @@ class BookstackConnector(LoadConnector, PollConnector):
             if page_data.get("updated_at") is not None
             else None
         )
+        # change start
         time.sleep(0.1)
+        if any(ele in str(page.get("book_slug")) for ele in BookstackConnector.redacted_list):
+            return Document(
+                id="page:0",
+                sections=[Section(link="#", text="")],
+                source=DocumentSource.BOOKSTACK,
+                semantic_identifier="Page: REDACTED",
+                title="REDACTED",
+                doc_updated_at=None,
+                metadata={"type": "page"},
+            )
+        # change end
         return Document(
             id="page:" + page_id,
             sections=[Section(link=url, text=text)],
