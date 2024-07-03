@@ -9,6 +9,10 @@ from danswer.server.features.document_set.models import DocumentSet
 from danswer.server.features.prompt.models import PromptSnapshot
 from danswer.server.features.tool.api import ToolSnapshot
 from danswer.server.models import MinimalUserSnapshot
+from danswer.utils.logger import setup_logger
+
+
+logger = setup_logger()
 
 
 class CreatePersonaRequest(BaseModel):
@@ -49,13 +53,19 @@ class PersonaSnapshot(BaseModel):
     prompts: list[PromptSnapshot]
     tools: list[ToolSnapshot]
     document_sets: list[DocumentSet]
-    users: list[UUID]
+    users: list[MinimalUserSnapshot]
     groups: list[int]
 
     @classmethod
-    def from_model(cls, persona: Persona) -> "PersonaSnapshot":
+    def from_model(
+        cls, persona: Persona, allow_deleted: bool = False
+    ) -> "PersonaSnapshot":
         if persona.deleted:
-            raise ValueError("Persona has been deleted")
+            error_msg = f"Persona with ID {persona.id} has been deleted"
+            if not allow_deleted:
+                raise ValueError(error_msg)
+            else:
+                logger.warning(error_msg)
 
         return PersonaSnapshot(
             id=persona.id,
@@ -82,7 +92,10 @@ class PersonaSnapshot(BaseModel):
                 DocumentSet.from_model(document_set_model)
                 for document_set_model in persona.document_sets
             ],
-            users=[user.id for user in persona.users],
+            users=[
+                MinimalUserSnapshot(id=user.id, email=user.email)
+                for user in persona.users
+            ],
             groups=[user_group.id for user_group in persona.groups],
         )
 

@@ -11,8 +11,10 @@ from retry import retry
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from slack_sdk.models.blocks import DividerBlock
+from slack_sdk.models.blocks import SectionBlock
 from sqlalchemy.orm import Session
 
+from danswer.configs.app_configs import DISABLE_GENERATIVE_AI
 from danswer.configs.danswerbot_configs import DANSWER_BOT_ANSWER_GENERATION_TIMEOUT
 from danswer.configs.danswerbot_configs import DANSWER_BOT_DISABLE_COT
 from danswer.configs.danswerbot_configs import DANSWER_BOT_DISABLE_DOCS_ONLY_ANSWER
@@ -35,6 +37,7 @@ from danswer.danswerbot.slack.constants import SLACK_CHANNEL_ID
 from danswer.danswerbot.slack.models import SlackMessageInfo
 from danswer.danswerbot.slack.utils import ChannelIdAdapter
 from danswer.danswerbot.slack.utils import fetch_userids_from_emails
+from danswer.danswerbot.slack.utils import fetch_userids_from_groups
 from danswer.danswerbot.slack.utils import respond_in_thread
 from danswer.danswerbot.slack.utils import slack_usage_report
 from danswer.danswerbot.slack.utils import SlackRateLimiter
@@ -47,7 +50,7 @@ from danswer.db.persona import fetch_persona_by_id
 from danswer.llm.answering.prompts.citations_prompt import (
     compute_max_document_tokens_for_persona,
 )
-from danswer.llm.factory import get_llm_for_persona
+from danswer.llm.factory import get_llms_for_persona
 from danswer.llm.utils import check_number_of_tokens
 from danswer.llm.utils import get_max_input_tokens
 from danswer.one_shot_answer.answer_question import get_search_answer
@@ -226,6 +229,7 @@ def handle_message(
     send_to: list[str] | None = None
     respond_tag_only = False
     respond_team_member_list = None
+    respond_slack_group_list = None
 
     bypass_acl = False
     if (
@@ -260,6 +264,7 @@ def handle_message(
 
         respond_tag_only = channel_conf.get("respond_tag_only") or False
         respond_team_member_list = channel_conf.get("respond_team_member_list") or None
+        respond_slack_group_list = channel_conf.get("respond_slack_group_list") or None
 
     if respond_tag_only and not bypass_filters:
         logger.info(
@@ -270,10 +275,15 @@ def handle_message(
 
     if respond_team_member_list:
         send_to, _ = fetch_userids_from_emails(respond_team_member_list, client)
+    if respond_slack_group_list:
+        user_ids, _ = fetch_userids_from_groups(respond_slack_group_list, client)
+        send_to = (send_to + user_ids) if send_to else user_ids
+    if send_to:
+        send_to = list(set(send_to))  # remove duplicates
 
     # If configured to respond to team members only, then cannot be used with a /DanswerBot command
     # which would just respond to the sender
-    if respond_team_member_list and is_bot_msg:
+    if (respond_team_member_list or respond_slack_group_list) and is_bot_msg:
         if sender_id:
             respond_in_thread(
                 client=client,
@@ -295,7 +305,7 @@ def handle_message(
         logger=logger,
     )
     @rate_limits(client=client, channel=channel, thread_ts=message_ts_to_respond_to)
-    def _get_answer(new_message_request: DirectQARequest) -> OneShotQAResponse:
+    def _get_answer(new_message_request: DirectQARequest) -> OneShotQAResponse | None:
         action = "slack_message"
         if is_bot_msg:
             action = "slack_slash_message"
@@ -315,7 +325,7 @@ def handle_message(
                     Persona,
                     fetch_persona_by_id(db_session, new_message_request.persona_id),
                 )
-                llm = get_llm_for_persona(persona)
+                llm, _ = get_llms_for_persona(persona)
 
                 # In cases of threads, split the available tokens between docs and thread context
                 input_tokens = get_max_input_tokens(
@@ -339,6 +349,9 @@ def handle_message(
                         - 512  # Needs to be more than any of the QA prompts
                         - check_number_of_tokens(query_text)
                     )
+
+            if DISABLE_GENERATIVE_AI:
+                return None
 
             # This also handles creating the query event in postgres
             answer = get_search_answer(
@@ -421,6 +434,46 @@ def handle_message(
             logger.error(f"Failed to remove Reaction due to: {e}")
 
         return True
+
+    # Edge case handling, for tracking down the Slack usage issue
+    if answer is None:
+        assert DISABLE_GENERATIVE_AI is True
+        try:
+            respond_in_thread(
+                client=client,
+                channel=channel,
+                receiver_ids=send_to,
+                text="Hello! Danswer has some results for you!",
+                blocks=[
+                    SectionBlock(
+                        text="Danswer is down for maintenance.\nWe're working hard on recharging the AI!"
+                    )
+                ],
+                thread_ts=message_ts_to_respond_to,
+                # don't unfurl, since otherwise we will have 5+ previews which makes the message very long
+                unfurl=False,
+            )
+
+            # For DM (ephemeral message), we need to create a thread via a normal message so the user can see
+            # the ephemeral message. This also will give the user a notification which ephemeral message does not.
+            if respond_team_member_list or respond_slack_group_list:
+                respond_in_thread(
+                    client=client,
+                    channel=channel,
+                    text=(
+                        "👋 Hi, we've just gathered and forwarded the relevant "
+                        + "information to the team. They'll get back to you shortly!"
+                    ),
+                    thread_ts=message_ts_to_respond_to,
+                )
+
+            return False
+
+        except Exception:
+            logger.exception(
+                f"Unable to process message - could not respond in slack in {num_retries} attempts"
+            )
+            return True
 
     # Got an answer at this point, can remove reaction and give results
     try:
@@ -548,7 +601,7 @@ def handle_message(
 
         # For DM (ephemeral message), we need to create a thread via a normal message so the user can see
         # the ephemeral message. This also will give the user a notification which ephemeral message does not.
-        if respond_team_member_list:
+        if respond_team_member_list or respond_slack_group_list:
             respond_in_thread(
                 client=client,
                 channel=channel,

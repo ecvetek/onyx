@@ -16,6 +16,7 @@ from danswer.auth.users import current_user
 from danswer.background.celery.celery_utils import get_deletion_status
 from danswer.configs.app_configs import ENABLED_CONNECTOR_TYPES
 from danswer.configs.constants import DocumentSource
+from danswer.configs.constants import FileOrigin
 from danswer.connectors.gmail.connector_auth import delete_gmail_service_account_key
 from danswer.connectors.gmail.connector_auth import delete_google_app_gmail_cred
 from danswer.connectors.gmail.connector_auth import get_gmail_auth_url
@@ -351,7 +352,13 @@ def upload_files(
         for file in files:
             file_path = os.path.join(str(uuid.uuid4()), cast(str, file.filename))
             deduped_file_paths.append(file_path)
-            file_store.save_file(file_name=file_path, content=file.file)
+            file_store.save_file(
+                file_name=file_path,
+                content=file.file,
+                display_name=file.filename,
+                file_origin=FileOrigin.CONNECTOR,
+                file_type=file.content_type or "text/plain",
+            )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return FileUploadResponse(file_paths=deduped_file_paths)
@@ -411,7 +418,9 @@ def get_connector_indexing_status(
                 credential=CredentialSnapshot.from_credential_db_model(credential),
                 public_doc=cc_pair.is_public,
                 owner=credential.user.email if credential.user else "",
-                last_status=cc_pair.last_attempt_status,
+                last_status=latest_index_attempt.status
+                if latest_index_attempt
+                else None,
                 last_success=cc_pair.last_successful_index_time,
                 docs_indexed=cc_pair_to_document_cnt.get(
                     (connector.id, credential.id), 0
@@ -431,6 +440,7 @@ def get_connector_indexing_status(
                 ),
                 is_deletable=check_deletion_attempt_is_allowed(
                     connector_credential_pair=cc_pair,
+                    db_session=db_session,
                     # allow scheduled indexing attempts here, since on deletion request we will cancel them
                     allow_scheduled=True,
                 )
@@ -501,6 +511,7 @@ def update_connector_from_model(
         input_type=updated_connector.input_type,
         connector_specific_config=updated_connector.connector_specific_config,
         refresh_freq=updated_connector.refresh_freq,
+        prune_freq=updated_connector.prune_freq,
         credential_ids=[
             association.credential.id for association in updated_connector.credentials
         ],
@@ -716,6 +727,7 @@ def get_connector_by_id(
         input_type=connector.input_type,
         connector_specific_config=connector.connector_specific_config,
         refresh_freq=connector.refresh_freq,
+        prune_freq=connector.prune_freq,
         credential_ids=[
             association.credential.id for association in connector.credentials
         ],

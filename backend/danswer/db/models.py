@@ -35,6 +35,7 @@ from sqlalchemy.types import TypeDecorator
 from danswer.auth.schemas import UserRole
 from danswer.configs.constants import DEFAULT_BOOST
 from danswer.configs.constants import DocumentSource
+from danswer.configs.constants import FileOrigin
 from danswer.configs.constants import MessageType
 from danswer.configs.constants import SearchFeedbackType
 from danswer.configs.constants import TokenRateLimitScope
@@ -107,6 +108,19 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
     role: Mapped[UserRole] = mapped_column(
         Enum(UserRole, native_enum=False, default=UserRole.BASIC)
     )
+
+    """
+    Preferences probably should be in a separate table at some point, but for now
+    putting here for simpicity
+    """
+
+    # if specified, controls the assistants that are shown to the user + their order
+    # if not specified, all assistants are shown
+    chosen_assistants: Mapped[list[int]] = mapped_column(
+        postgresql.ARRAY(Integer), nullable=True
+    )
+
+    # relationships
     credentials: Mapped[list["Credential"]] = relationship(
         "Credential", back_populates="user", lazy="joined"
     )
@@ -119,6 +133,8 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
     prompts: Mapped[list["Prompt"]] = relationship("Prompt", back_populates="user")
     # Personas owned by this user
     personas: Mapped[list["Persona"]] = relationship("Persona", back_populates="user")
+    # Custom tools created by this user
+    custom_tools: Mapped[list["Tool"]] = relationship("Tool", back_populates="user")
 
 
 class AccessToken(SQLAlchemyBaseAccessTokenTableUUID, Base):
@@ -269,9 +285,6 @@ class ConnectorCredentialPair(Base):
     last_successful_index_time: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(timezone=True), default=None
     )
-    last_attempt_status: Mapped[IndexingStatus | None] = mapped_column(
-        Enum(IndexingStatus, native_enum=False)
-    )
     total_docs_indexed: Mapped[int] = mapped_column(Integer, default=0)
 
     connector: Mapped["Connector"] = relationship(
@@ -319,7 +332,6 @@ class Document(Base):
     primary_owners: Mapped[list[str] | None] = mapped_column(
         postgresql.ARRAY(String), nullable=True
     )
-    # Something like assignee or space owner
     secondary_owners: Mapped[list[str] | None] = mapped_column(
         postgresql.ARRAY(String), nullable=True
     )
@@ -371,6 +383,7 @@ class Connector(Base):
         postgresql.JSONB()
     )
     refresh_freq: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prune_freq: Mapped[int | None] = mapped_column(Integer, nullable=True)
     time_created: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -607,6 +620,26 @@ class SearchDoc(Base):
     )
 
 
+class ToolCall(Base):
+    """Represents a single tool call"""
+
+    __tablename__ = "tool_call"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # not a FK because we want to be able to delete the tool without deleting
+    # this entry
+    tool_id: Mapped[int] = mapped_column(Integer())
+    tool_name: Mapped[str] = mapped_column(String())
+    tool_arguments: Mapped[dict[str, JSON_ro]] = mapped_column(postgresql.JSONB())
+    tool_result: Mapped[JSON_ro] = mapped_column(postgresql.JSONB())
+
+    message_id: Mapped[int] = mapped_column(ForeignKey("chat_message.id"))
+
+    message: Mapped["ChatMessage"] = relationship(
+        "ChatMessage", back_populates="tool_calls"
+    )
+
+
 class ChatSession(Base):
     __tablename__ = "chat_session"
 
@@ -627,6 +660,8 @@ class ChatSession(Base):
     folder_id: Mapped[int | None] = mapped_column(
         ForeignKey("chat_folder.id"), nullable=True
     )
+
+    current_alternate_model: Mapped[str | None] = mapped_column(String, default=None)
 
     # the latest "overrides" specified by the user. These take precedence over
     # the attached persona. However, overrides specified directly in the
@@ -655,7 +690,7 @@ class ChatSession(Base):
         "ChatFolder", back_populates="chat_sessions"
     )
     messages: Mapped[list["ChatMessage"]] = relationship(
-        "ChatMessage", back_populates="chat_session", cascade="delete"
+        "ChatMessage", back_populates="chat_session"
     )
     persona: Mapped["Persona"] = relationship("Persona")
 
@@ -673,6 +708,11 @@ class ChatMessage(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     chat_session_id: Mapped[int] = mapped_column(ForeignKey("chat_session.id"))
+
+    alternate_assistant_id = mapped_column(
+        Integer, ForeignKey("persona.id"), nullable=True
+    )
+
     parent_message: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latest_child_message: Mapped[int | None] = mapped_column(Integer, nullable=True)
     message: Mapped[str] = mapped_column(Text)
@@ -701,16 +741,24 @@ class ChatMessage(Base):
 
     chat_session: Mapped[ChatSession] = relationship("ChatSession")
     prompt: Mapped[Optional["Prompt"]] = relationship("Prompt")
+
     chat_message_feedbacks: Mapped[list["ChatMessageFeedback"]] = relationship(
-        "ChatMessageFeedback", back_populates="chat_message"
+        "ChatMessageFeedback",
+        back_populates="chat_message",
     )
+
     document_feedbacks: Mapped[list["DocumentRetrievalFeedback"]] = relationship(
-        "DocumentRetrievalFeedback", back_populates="chat_message"
+        "DocumentRetrievalFeedback",
+        back_populates="chat_message",
     )
     search_docs: Mapped[list["SearchDoc"]] = relationship(
         "SearchDoc",
         secondary="chat_message__search_doc",
         back_populates="chat_messages",
+    )
+    tool_calls: Mapped[list["ToolCall"]] = relationship(
+        "ToolCall",
+        back_populates="message",
     )
 
 
@@ -748,7 +796,9 @@ class DocumentRetrievalFeedback(Base):
     __tablename__ = "document_retrieval_feedback"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    chat_message_id: Mapped[int] = mapped_column(ForeignKey("chat_message.id"))
+    chat_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chat_message.id", ondelete="SET NULL"), nullable=True
+    )
     document_id: Mapped[str] = mapped_column(ForeignKey("document.id"))
     # How high up this document is in the results, 1 for first
     document_rank: Mapped[int] = mapped_column(Integer)
@@ -758,7 +808,9 @@ class DocumentRetrievalFeedback(Base):
     )
 
     chat_message: Mapped[ChatMessage] = relationship(
-        "ChatMessage", back_populates="document_feedbacks"
+        "ChatMessage",
+        back_populates="document_feedbacks",
+        foreign_keys=[chat_message_id],
     )
     document: Mapped[Document] = relationship(
         "Document", back_populates="retrieval_feedbacks"
@@ -769,14 +821,18 @@ class ChatMessageFeedback(Base):
     __tablename__ = "chat_feedback"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    chat_message_id: Mapped[int] = mapped_column(ForeignKey("chat_message.id"))
+    chat_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chat_message.id", ondelete="SET NULL"), nullable=True
+    )
     is_positive: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     required_followup: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     feedback_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     predefined_feedback: Mapped[str | None] = mapped_column(String, nullable=True)
 
     chat_message: Mapped[ChatMessage] = relationship(
-        "ChatMessage", back_populates="chat_message_feedbacks"
+        "ChatMessage",
+        back_populates="chat_message_feedbacks",
+        foreign_keys=[chat_message_id],
     )
 
 
@@ -890,9 +946,18 @@ class Tool(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=True)
     # ID of the tool in the codebase, only applies for in-code tools.
-    # tools defiend via the UI will have this as None
+    # tools defined via the UI will have this as None
     in_code_tool_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
+    # OpenAPI scheme for the tool. Only applies to tools defined via the UI.
+    openapi_schema: Mapped[dict[str, Any] | None] = mapped_column(
+        postgresql.JSONB(), nullable=True
+    )
+
+    # user who created / owns the tool. Will be None for built-in tools.
+    user_id: Mapped[UUID | None] = mapped_column(ForeignKey("user.id"), nullable=True)
+
+    user: Mapped[User | None] = relationship("User", back_populates="custom_tools")
     # Relationship to Persona through the association table
     personas: Mapped[list["Persona"]] = relationship(
         "Persona",
@@ -1013,6 +1078,7 @@ class ChannelConfig(TypedDict):
     respond_tag_only: NotRequired[bool]  # defaults to False
     respond_to_bots: NotRequired[bool]  # defaults to False
     respond_team_member_list: NotRequired[list[str]]
+    respond_slack_group_list: NotRequired[list[str]]
     answer_filters: NotRequired[list[AllowedAnswerFilters]]
     # If None then no follow up
     # If empty list, follow up with no tags
@@ -1071,8 +1137,13 @@ class KVStore(Base):
 
 class PGFileStore(Base):
     __tablename__ = "file_store"
-    file_name = mapped_column(String, primary_key=True)
-    lobj_oid = mapped_column(Integer, nullable=False)
+
+    file_name: Mapped[str] = mapped_column(String, primary_key=True)
+    display_name: Mapped[str] = mapped_column(String, nullable=True)
+    file_origin: Mapped[FileOrigin] = mapped_column(Enum(FileOrigin, native_enum=False))
+    file_type: Mapped[str] = mapped_column(String, default="text/plain")
+    file_metadata: Mapped[JSON_ro] = mapped_column(postgresql.JSONB(), nullable=True)
+    lobj_oid: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 """
@@ -1314,3 +1385,30 @@ class EmailToExternalUserCache(Base):
     )
 
     user = relationship("User")
+
+
+class UsageReport(Base):
+    """This stores metadata about usage reports generated by admin including user who generated
+    them as well las the period they cover. The actual zip file of the report is stored as a lo
+    using the PGFileStore
+    """
+
+    __tablename__ = "usage_reports"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    report_name: Mapped[str] = mapped_column(ForeignKey("file_store.file_name"))
+
+    # if None, report was auto-generated
+    requestor_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("user.id"), nullable=True
+    )
+    time_created: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    period_from: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    period_to: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    requestor = relationship("User")
+    file = relationship("PGFileStore")

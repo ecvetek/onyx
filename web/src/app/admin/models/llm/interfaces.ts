@@ -7,7 +7,7 @@ export interface CustomConfigKey {
 
 export interface WellKnownLLMProviderDescriptor {
   name: string;
-  display_name: string | null;
+  display_name: string;
 
   api_key_required: boolean;
   api_base_required: boolean;
@@ -34,6 +34,7 @@ export interface FullLLMProvider extends LLMProvider {
   id: number;
   is_default_provider: boolean | null;
   model_names: string[];
+  icon?: React.FC<{ size?: number; className?: string }>;
 }
 
 export interface LLMProviderDescriptor {
