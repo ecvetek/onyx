@@ -1,15 +1,18 @@
 "use client";
+import ReactMarkdown from "react-markdown";
 
 import { redirect, useRouter, useSearchParams } from "next/navigation";
 import {
   BackendChatSession,
   BackendMessage,
   ChatFileType,
+  ChatSession,
   ChatSessionSharedStatus,
   DocumentsResponse,
   FileDescriptor,
   ImageGenerationDisplay,
   Message,
+  MessageResponseIDInfo,
   RetrievalType,
   StreamingError,
   ToolCallMetadata,
@@ -26,6 +29,7 @@ import {
   buildLatestMessageChain,
   checkAnyAssistantHasSearch,
   createChatSession,
+  deleteChatSession,
   getCitedDocumentsFromMessage,
   getHumanAndAIMessageFromMessageNumber,
   getLastSuccessfulMessageId,
@@ -47,7 +51,7 @@ import { SEARCH_PARAM_NAMES, shouldSubmitOnLoad } from "./searchParams";
 import { useDocumentSelection } from "./useDocumentSelection";
 import { LlmOverride, useFilters, useLlmOverride } from "@/lib/hooks";
 import { computeAvailableFilters } from "@/lib/filters";
-import { FeedbackType } from "./types";
+import { ChatState, FeedbackType } from "./types";
 import { DocumentSidebar } from "./documentSidebar/DocumentSidebar";
 import { DanswerInitializingLoader } from "@/components/DanswerInitializingLoader";
 import { FeedbackModal } from "./modal/FeedbackModal";
@@ -79,6 +83,10 @@ import { SIDEBAR_TOGGLED_COOKIE_NAME } from "@/components/resizable/constants";
 import FixedLogo from "./shared_chat_search/FixedLogo";
 import { getSecondsUntilExpiration } from "@/lib/time";
 import { SetDefaultModelModal } from "./modal/SetDefaultModelModal";
+import { DeleteChatModal } from "./modal/DeleteChatModal";
+import remarkGfm from "remark-gfm";
+import { MinimalMarkdown } from "@/components/chat_search/MinimalMarkdown";
+import ExceptionTraceModal from "@/components/modals/ExceptionTraceModal";
 
 const TEMP_USER_MESSAGE_ID = -1;
 const TEMP_ASSISTANT_MESSAGE_ID = -2;
@@ -112,6 +120,8 @@ export function ChatPage({
 
   // chat session
   const existingChatIdRaw = searchParams.get("chatId");
+  const currentPersonaId = searchParams.get(SEARCH_PARAM_NAMES.PERSONA_ID);
+
   const existingChatSessionId = existingChatIdRaw
     ? parseInt(existingChatIdRaw)
     : null;
@@ -175,10 +185,19 @@ export function ChatPage({
     defaultTemperature
   );
 
-  const liveAssistant =
-    selectedAssistant || filteredAssistants[0] || availableAssistants[0];
+  const [alternativeAssistant, setAlternativeAssistant] =
+    useState<Persona | null>(null);
 
+  const liveAssistant =
+    alternativeAssistant ||
+    selectedAssistant ||
+    filteredAssistants[0] ||
+    availableAssistants[0];
   useEffect(() => {
+    if (!loadedIdSessionRef.current && !currentPersonaId) {
+      return;
+    }
+
     const personaDefault = getLLMProviderOverrideForPersona(
       liveAssistant,
       llmProviders
@@ -193,9 +212,28 @@ export function ChatPage({
     }
   }, [liveAssistant]);
 
+  const stopGeneration = () => {
+    if (abortController) {
+      abortController.abort();
+    }
+    const lastMessage = messageHistory[messageHistory.length - 1];
+    if (
+      lastMessage &&
+      lastMessage.type === "assistant" &&
+      lastMessage.toolCalls[0] &&
+      lastMessage.toolCalls[0].tool_result === undefined
+    ) {
+      const newCompleteMessageMap = new Map(completeMessageDetail.messageMap);
+      const updatedMessage = { ...lastMessage, toolCalls: [] };
+      newCompleteMessageMap.set(lastMessage.messageId, updatedMessage);
+      setCompleteMessageDetail({
+        sessionId: completeMessageDetail.sessionId,
+        messageMap: newCompleteMessageMap,
+      });
+    }
+  };
+
   // this is for "@"ing assistants
-  const [alternativeAssistant, setAlternativeAssistant] =
-    useState<Persona | null>(null);
 
   // this is used to track which assistant is being used to generate the current message
   // for example, this would come into play when:
@@ -286,7 +324,7 @@ export function ChatPage({
         }
         return;
       }
-
+      clearSelectedDocuments();
       setIsFetchingChatMessages(true);
       const response = await fetch(
         `/api/chat/get-chat-session/${existingChatSessionId}`
@@ -397,6 +435,7 @@ export function ChatPage({
       );
       messages[0].parentMessageId = systemMessageId;
     }
+
     messages.forEach((message) => {
       const idToReplace = replacementsMap?.get(message.messageId);
       if (idToReplace) {
@@ -412,7 +451,6 @@ export function ChatPage({
       }
       newCompleteMessageMap.set(message.messageId, message);
     });
-
     // if specified, make these new message the latest of the current message chain
     if (makeLatestChildMessage) {
       const currentMessageChain = buildLatestMessageChain(
@@ -436,7 +474,8 @@ export function ChatPage({
   const messageHistory = buildLatestMessageChain(
     completeMessageDetail.messageMap
   );
-  const [isStreaming, setIsStreaming] = useState(false);
+  const [submittedMessage, setSubmittedMessage] = useState("");
+  const [chatState, setChatState] = useState<ChatState>("input");
   const [abortController, setAbortController] =
     useState<AbortController | null>(null);
 
@@ -647,13 +686,11 @@ export function ChatPage({
     params: any
   ) {
     try {
-      for await (const packetBunch of sendMessage(params)) {
+      for await (const packet of sendMessage(params)) {
         if (params.signal?.aborted) {
           throw new Error("AbortError");
         }
-        for (const packet of packetBunch) {
-          stack.push(packet);
-        }
+        stack.push(packet);
       }
     } catch (error: unknown) {
       if (error instanceof Error) {
@@ -693,7 +730,7 @@ export function ChatPage({
     isSeededChat?: boolean;
     alternativeAssistantOverride?: Persona | null;
   } = {}) => {
-    if (isStreaming) {
+    if (chatState != "input") {
       setPopup({
         message: "Please wait for the response to complete",
         type: "error",
@@ -702,6 +739,7 @@ export function ChatPage({
       return;
     }
 
+    setChatState("loading");
     const controller = new AbortController();
     setAbortController(controller);
 
@@ -741,13 +779,15 @@ export function ChatPage({
           "Failed to re-send message - please refresh the page and try again.",
         type: "error",
       });
+      setChatState("input");
       return;
     }
-
     let currMessage = messageToResend ? messageToResend.message : message;
     if (messageOverride) {
       currMessage = messageOverride;
     }
+
+    setSubmittedMessage(currMessage);
     const currMessageHistory =
       messageToResendIndex !== null
         ? messageHistory.slice(0, messageToResendIndex)
@@ -759,39 +799,6 @@ export function ChatPage({
         : null) ||
       (messageMap.size === 1 ? Array.from(messageMap.values())[0] : null);
 
-    // if we're resending, set the parent's child to null
-    // we will use tempMessages until the regenerated message is complete
-    const messageUpdates: Message[] = [
-      {
-        messageId: TEMP_USER_MESSAGE_ID,
-        message: currMessage,
-        type: "user",
-        files: currentMessageFiles,
-        toolCalls: [],
-        parentMessageId: parentMessage?.messageId || null,
-      },
-    ];
-    if (parentMessage) {
-      messageUpdates.push({
-        ...parentMessage,
-        childrenMessageIds: (parentMessage.childrenMessageIds || []).concat([
-          TEMP_USER_MESSAGE_ID,
-        ]),
-        latestChildMessageId: TEMP_USER_MESSAGE_ID,
-      });
-    }
-    const { messageMap: frozenMessageMap, sessionId: frozenSessionId } =
-      upsertToCompleteMessageMap({
-        messages: messageUpdates,
-        chatSessionId: currChatSessionId,
-      });
-
-    // on initial message send, we insert a dummy system message
-    // set this as the parent here if no parent is set
-    if (!parentMessage && frozenMessageMap.size === 2) {
-      parentMessage = frozenMessageMap.get(SYSTEM_MESSAGE_ID) || null;
-    }
-
     const currentAssistantId = alternativeAssistantOverride
       ? alternativeAssistantOverride.id
       : alternativeAssistant
@@ -799,8 +806,8 @@ export function ChatPage({
         : liveAssistant.id;
 
     resetInputBar();
+    let messageUpdates: Message[] | null = null;
 
-    setIsStreaming(true);
     let answer = "";
     let query: string | null = null;
     let retrievalType: RetrievalType =
@@ -810,8 +817,17 @@ export function ChatPage({
     let documents: DanswerDocument[] = selectedDocuments;
     let aiMessageImages: FileDescriptor[] | null = null;
     let error: string | null = null;
+    let stackTrace: string | null = null;
+
     let finalMessage: BackendMessage | null = null;
     let toolCalls: ToolCallMetadata[] = [];
+
+    let initialFetchDetails: null | {
+      user_message_id: number;
+      assistant_message_id: number;
+      frozenMessageMap: Map<number, Message>;
+      frozenSessionId: number | null;
+    } = null;
 
     try {
       const lastSuccessfulMessageId =
@@ -820,7 +836,6 @@ export function ChatPage({
       const stack = new CurrentMessageFIFO();
       updateCurrentMessageFIFO(stack, {
         signal: controller.signal, // Add this line
-
         message: currMessage,
         alternateAssistantId: currentAssistantId,
         fileDescriptors: currentMessageFiles,
@@ -857,20 +872,6 @@ export function ChatPage({
         useExistingUserMessage: isSeededChat,
       });
 
-      const updateFn = (messages: Message[]) => {
-        const replacementsMap = finalMessage
-          ? new Map([
-              [messages[0].messageId, TEMP_USER_MESSAGE_ID],
-              [messages[1].messageId, TEMP_ASSISTANT_MESSAGE_ID],
-            ] as [number, number][])
-          : null;
-        upsertToCompleteMessageMap({
-          messages: messages,
-          replacementsMap: replacementsMap,
-          completeMessageMapOverride: frozenMessageMap,
-          chatSessionId: frozenSessionId!,
-        });
-      };
       const delay = (ms: number) => {
         return new Promise((resolve) => setTimeout(resolve, ms));
       };
@@ -881,7 +882,71 @@ export function ChatPage({
 
         if (!stack.isEmpty()) {
           const packet = stack.nextPacket();
-          if (packet) {
+          if (!packet) {
+            continue;
+          }
+
+          if (!initialFetchDetails) {
+            if (!Object.hasOwn(packet, "user_message_id")) {
+              console.error(
+                "First packet should contain message response info "
+              );
+              continue;
+            }
+
+            const messageResponseIDInfo = packet as MessageResponseIDInfo;
+
+            const user_message_id = messageResponseIDInfo.user_message_id!;
+            const assistant_message_id =
+              messageResponseIDInfo.reserved_assistant_message_id;
+
+            // we will use tempMessages until the regenerated message is complete
+            messageUpdates = [
+              {
+                messageId: user_message_id,
+                message: currMessage,
+                type: "user",
+                files: currentMessageFiles,
+                toolCalls: [],
+                parentMessageId: parentMessage?.messageId || null,
+              },
+            ];
+            if (parentMessage) {
+              messageUpdates.push({
+                ...parentMessage,
+                childrenMessageIds: (
+                  parentMessage.childrenMessageIds || []
+                ).concat([user_message_id]),
+                latestChildMessageId: user_message_id,
+              });
+            }
+
+            const {
+              messageMap: currentFrozenMessageMap,
+              sessionId: currentFrozenSessionId,
+            } = upsertToCompleteMessageMap({
+              messages: messageUpdates,
+              chatSessionId: currChatSessionId,
+            });
+
+            const frozenMessageMap = currentFrozenMessageMap;
+            const frozenSessionId = currentFrozenSessionId;
+            initialFetchDetails = {
+              frozenMessageMap,
+              frozenSessionId,
+              assistant_message_id,
+              user_message_id,
+            };
+          } else {
+            const { user_message_id, frozenMessageMap, frozenSessionId } =
+              initialFetchDetails;
+            setChatState((chatState) => {
+              if (chatState == "loading") {
+                return "streaming";
+              }
+              return chatState;
+            });
+
             if (Object.hasOwn(packet, "answer_piece")) {
               answer += (packet as AnswerPiecePacket).answer_piece;
             } else if (Object.hasOwn(packet, "top_documents")) {
@@ -891,7 +956,7 @@ export function ChatPage({
               if (documents && documents.length > 0) {
                 // point to the latest message (we don't know the messageId yet, which is why
                 // we have to use -1)
-                setSelectedMessageForDocDisplay(TEMP_USER_MESSAGE_ID);
+                setSelectedMessageForDocDisplay(user_message_id);
               }
             } else if (Object.hasOwn(packet, "tool_name")) {
               toolCalls = [
@@ -901,6 +966,14 @@ export function ChatPage({
                   tool_result: (packet as ToolCallMetadata).tool_result,
                 },
               ];
+              if (
+                !toolCalls[0].tool_result ||
+                toolCalls[0].tool_result == undefined
+              ) {
+                setChatState("toolBuilding");
+              } else {
+                setChatState("streaming");
+              }
             } else if (Object.hasOwn(packet, "file_ids")) {
               aiMessageImages = (packet as ImageGenerationDisplay).file_ids.map(
                 (fileId) => {
@@ -912,27 +985,39 @@ export function ChatPage({
               );
             } else if (Object.hasOwn(packet, "error")) {
               error = (packet as StreamingError).error;
+              stackTrace = (packet as StreamingError).stack_trace;
             } else if (Object.hasOwn(packet, "message_id")) {
               finalMessage = packet as BackendMessage;
             }
 
-            const newUserMessageId =
-              finalMessage?.parent_message || TEMP_USER_MESSAGE_ID;
-            const newAssistantMessageId =
-              finalMessage?.message_id || TEMP_ASSISTANT_MESSAGE_ID;
+            // on initial message send, we insert a dummy system message
+            // set this as the parent here if no parent is set
+            parentMessage =
+              parentMessage || frozenMessageMap?.get(SYSTEM_MESSAGE_ID)!;
+
+            const updateFn = (messages: Message[]) => {
+              const replacementsMap = null;
+              upsertToCompleteMessageMap({
+                messages: messages,
+                replacementsMap: replacementsMap,
+                completeMessageMapOverride: frozenMessageMap,
+                chatSessionId: frozenSessionId!,
+              });
+            };
+
             updateFn([
               {
-                messageId: newUserMessageId,
+                messageId: initialFetchDetails.user_message_id!,
                 message: currMessage,
                 type: "user",
                 files: currentMessageFiles,
                 toolCalls: [],
-                parentMessageId: parentMessage?.messageId || null,
-                childrenMessageIds: [newAssistantMessageId],
-                latestChildMessageId: newAssistantMessageId,
+                parentMessageId: error ? null : lastSuccessfulMessageId,
+                childrenMessageIds: [initialFetchDetails.assistant_message_id!],
+                latestChildMessageId: initialFetchDetails.assistant_message_id,
               },
               {
-                messageId: newAssistantMessageId,
+                messageId: initialFetchDetails.assistant_message_id!,
                 message: error || answer,
                 type: error ? "error" : "assistant",
                 retrievalType,
@@ -942,8 +1027,9 @@ export function ChatPage({
                 citations: finalMessage?.citations || {},
                 files: finalMessage?.files || aiMessageImages || [],
                 toolCalls: finalMessage?.tool_calls || toolCalls,
-                parentMessageId: newUserMessageId,
+                parentMessageId: initialFetchDetails.user_message_id,
                 alternateAssistantID: alternativeAssistant?.id,
+                stackTrace: stackTrace,
               },
             ]);
           }
@@ -954,7 +1040,8 @@ export function ChatPage({
       upsertToCompleteMessageMap({
         messages: [
           {
-            messageId: TEMP_USER_MESSAGE_ID,
+            messageId:
+              initialFetchDetails?.user_message_id || TEMP_USER_MESSAGE_ID,
             message: currMessage,
             type: "user",
             files: currentMessageFiles,
@@ -962,24 +1049,28 @@ export function ChatPage({
             parentMessageId: parentMessage?.messageId || SYSTEM_MESSAGE_ID,
           },
           {
-            messageId: TEMP_ASSISTANT_MESSAGE_ID,
+            messageId:
+              initialFetchDetails?.assistant_message_id ||
+              TEMP_ASSISTANT_MESSAGE_ID,
             message: errorMsg,
             type: "error",
             files: aiMessageImages || [],
             toolCalls: [],
-            parentMessageId: TEMP_USER_MESSAGE_ID,
+            parentMessageId:
+              initialFetchDetails?.user_message_id || TEMP_USER_MESSAGE_ID,
           },
         ],
-        completeMessageMapOverride: frozenMessageMap,
+        completeMessageMapOverride: completeMessageDetail.messageMap,
       });
     }
-
-    setIsStreaming(false);
+    setChatState("input");
     if (isNewSession) {
       if (finalMessage) {
         setSelectedMessageForDocDisplay(finalMessage.message_id);
       }
+
       if (!searchParamBasedChatSessionName) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
         await nameChatSession(currChatSessionId, currMessage);
       }
 
@@ -1039,8 +1130,8 @@ export function ChatPage({
   const onAssistantChange = (assistant: Persona | null) => {
     if (assistant && assistant.id !== liveAssistant.id) {
       // Abort the ongoing stream if it exists
-      if (abortController && isStreaming) {
-        abortController.abort();
+      if (chatState != "input") {
+        stopGeneration();
         resetInputBar();
       }
 
@@ -1107,6 +1198,7 @@ export function ChatPage({
   // settings are passed in via Context and therefore aren't
   // available in server-side components
   const settings = useContext(SettingsContext);
+  const enterpriseSettings = settings?.enterpriseSettings;
   if (settings?.settings?.chat_page_enabled === false) {
     router.push("/search");
   }
@@ -1141,7 +1233,7 @@ export function ChatPage({
   });
 
   useScrollonStream({
-    isStreaming,
+    chatState,
     scrollableDivRef,
     scrollDist,
     endDivRef,
@@ -1165,6 +1257,9 @@ export function ChatPage({
       liveAssistant
     );
   });
+  const [stackTraceModalContent, setStackTraceModalContent] = useState<
+    string | null
+  >(null);
 
   const innerSidebarElementRef = useRef<HTMLDivElement>(null);
   const [settingsToggled, setSettingsToggled] = useState(false);
@@ -1188,7 +1283,17 @@ export function ChatPage({
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [router]);
+  const [sharedChatSession, setSharedChatSession] =
+    useState<ChatSession | null>();
+  const [deletingChatSession, setDeletingChatSession] =
+    useState<ChatSession | null>();
 
+  const showDeleteModal = (chatSession: ChatSession) => {
+    setDeletingChatSession(chatSession);
+  };
+  const showShareModal = (chatSession: ChatSession) => {
+    setSharedChatSession(chatSession);
+  };
   const [documentSelection, setDocumentSelection] = useState(false);
   const toggleDocumentSelectionAspects = () => {
     setDocumentSelection((documentSelection) => !documentSelection);
@@ -1229,11 +1334,36 @@ export function ChatPage({
           onClose={() => setSettingsToggled(false)}
         />
       )}
-      {sharingModalVisible && chatSessionIdRef.current !== null && (
+
+      {deletingChatSession && (
+        <DeleteChatModal
+          onClose={() => setDeletingChatSession(null)}
+          onSubmit={async () => {
+            const response = await deleteChatSession(deletingChatSession.id);
+            if (response.ok) {
+              setDeletingChatSession(null);
+              // go back to the main page
+              router.push("/chat");
+            } else {
+              alert("Failed to delete chat session");
+            }
+          }}
+          chatSessionName={deletingChatSession.name}
+        />
+      )}
+
+      {stackTraceModalContent && (
+        <ExceptionTraceModal
+          onOutsideClick={() => setStackTraceModalContent(null)}
+          exceptionTrace={stackTraceModalContent}
+        />
+      )}
+
+      {sharedChatSession && (
         <ShareChatSessionModal
-          chatSessionId={chatSessionIdRef.current}
-          existingSharedStatus={chatSessionSharedStatus}
-          onClose={() => setSharingModalVisible(false)}
+          chatSessionId={sharedChatSession.id}
+          existingSharedStatus={sharedChatSession.shared_status}
+          onClose={() => setSharedChatSession(null)}
           onShare={(shared) =>
             setChatSessionSharedStatus(
               shared
@@ -1241,6 +1371,13 @@ export function ChatPage({
                 : ChatSessionSharedStatus.Private
             )
           }
+        />
+      )}
+      {sharingModalVisible && chatSessionIdRef.current !== null && (
+        <ShareChatSessionModal
+          chatSessionId={chatSessionIdRef.current}
+          existingSharedStatus={chatSessionSharedStatus}
+          onClose={() => setSharingModalVisible(false)}
         />
       )}
       <div className="fixed inset-0 flex flex-col text-default">
@@ -1267,6 +1404,7 @@ export function ChatPage({
             >
               <div className="w-full relative">
                 <HistorySidebar
+                  stopGenerating={stopGeneration}
                   reset={() => setMessage("")}
                   page="chat"
                   ref={innerSidebarElementRef}
@@ -1277,6 +1415,8 @@ export function ChatPage({
                   folders={folders}
                   openedFolders={openedFolders}
                   removeToggle={removeToggle}
+                  showShareModal={showShareModal}
+                  showDeleteModal={showDeleteModal}
                 />
               </div>
             </div>
@@ -1338,7 +1478,7 @@ export function ChatPage({
 
                           {messageHistory.length === 0 &&
                             !isFetchingChatMessages &&
-                            !isStreaming && (
+                            chatState == "input" && (
                               <ChatIntro
                                 availableSources={finalAvailableSources}
                                 selectedPersona={liveAssistant}
@@ -1362,6 +1502,7 @@ export function ChatPage({
                                 return (
                                   <div key={messageReactComponentKey}>
                                     <HumanMessage
+                                      stopGenerating={stopGeneration}
                                       content={message.message}
                                       files={message.files}
                                       messageId={message.messageId}
@@ -1414,9 +1555,7 @@ export function ChatPage({
                                   (selectedMessageForDocDisplay !== null &&
                                     selectedMessageForDocDisplay ===
                                       message.messageId) ||
-                                  (selectedMessageForDocDisplay ===
-                                    TEMP_USER_MESSAGE_ID &&
-                                    i === messageHistory.length - 1);
+                                  i === messageHistory.length - 1;
                                 const previousMessage =
                                   i !== 0 ? messageHistory[i - 1] : null;
 
@@ -1465,7 +1604,8 @@ export function ChatPage({
                                       }
                                       isComplete={
                                         i !== messageHistory.length - 1 ||
-                                        !isStreaming
+                                        (chatState != "streaming" &&
+                                          chatState != "toolBuilding")
                                       }
                                       hasDocs={
                                         (message.documents &&
@@ -1473,7 +1613,7 @@ export function ChatPage({
                                       }
                                       handleFeedback={
                                         i === messageHistory.length - 1 &&
-                                        isStreaming
+                                        chatState != "input"
                                           ? undefined
                                           : (feedbackType) =>
                                               setCurrentFeedback([
@@ -1483,7 +1623,7 @@ export function ChatPage({
                                       }
                                       handleSearchQueryEdit={
                                         i === messageHistory.length - 1 &&
-                                        !isStreaming
+                                        chatState == "input"
                                           ? (newQuery) => {
                                               if (!previousMessage) {
                                                 setPopup({
@@ -1571,6 +1711,18 @@ export function ChatPage({
                                       content={
                                         <p className="text-red-700 text-sm my-auto">
                                           {message.message}
+                                          {message.stackTrace && (
+                                            <span
+                                              onClick={() =>
+                                                setStackTraceModalContent(
+                                                  message.stackTrace!
+                                                )
+                                              }
+                                              className="ml-2 cursor-pointer underline"
+                                            >
+                                              Show stack trace.
+                                            </span>
+                                          )}
                                         </p>
                                       }
                                     />
@@ -1578,34 +1730,39 @@ export function ChatPage({
                                 );
                               }
                             })}
-                            {isStreaming &&
-                              messageHistory.length > 0 &&
-                              messageHistory[messageHistory.length - 1].type ===
+                            {chatState == "loading" &&
+                              messageHistory[messageHistory.length - 1]?.type !=
                                 "user" && (
-                                <div
-                                  key={`${messageHistory.length}-${chatSessionIdRef.current}`}
-                                >
-                                  <AIMessage
-                                    currentPersona={liveAssistant}
-                                    alternativeAssistant={
-                                      alternativeGeneratingAssistant ??
-                                      alternativeAssistant
-                                    }
-                                    messageId={null}
-                                    personaName={liveAssistant.name}
-                                    content={
-                                      <div
-                                        key={"Generating"}
-                                        className="mr-auto relative inline-block"
-                                      >
-                                        <span className="text-sm loading-text">
-                                          Thinking...
-                                        </span>
-                                      </div>
-                                    }
-                                  />
-                                </div>
+                                <HumanMessage
+                                  messageId={-1}
+                                  content={submittedMessage}
+                                />
                               )}
+                            {chatState == "loading" && (
+                              <div
+                                key={`${messageHistory.length}-${chatSessionIdRef.current}`}
+                              >
+                                <AIMessage
+                                  currentPersona={liveAssistant}
+                                  alternativeAssistant={
+                                    alternativeGeneratingAssistant ??
+                                    alternativeAssistant
+                                  }
+                                  messageId={null}
+                                  personaName={liveAssistant.name}
+                                  content={
+                                    <div
+                                      key={"Generating"}
+                                      className="mr-auto relative inline-block"
+                                    >
+                                      <span className="text-sm loading-text">
+                                        Thinking...
+                                      </span>
+                                    </div>
+                                  }
+                                />
+                              </div>
+                            )}
 
                             {currentPersona &&
                               currentPersona.starter_messages &&
@@ -1654,7 +1811,7 @@ export function ChatPage({
                           ref={inputRef}
                           className="absolute bottom-0 z-10 w-full"
                         >
-                          <div className="w-full relative pb-4">
+                          <div className="w-[95%] mx-auto relative mb-8">
                             {aboveHorizon && (
                               <div className="pointer-events-none w-full bg-transparent flex sticky justify-center">
                                 <button
@@ -1667,6 +1824,8 @@ export function ChatPage({
                             )}
 
                             <ChatInputBar
+                              chatState={chatState}
+                              stopGenerating={stopGeneration}
                               openModelSettings={() => setSettingsToggled(true)}
                               inputPrompts={userInputPrompts}
                               showDocs={() => setDocumentSelection(true)}
@@ -1681,7 +1840,6 @@ export function ChatPage({
                               message={message}
                               setMessage={setMessage}
                               onSubmit={onSubmit}
-                              isStreaming={isStreaming}
                               filterManager={filterManager}
                               llmOverrideManager={llmOverrideManager}
                               files={currentMessageFiles}
@@ -1690,6 +1848,35 @@ export function ChatPage({
                               textAreaRef={textAreaRef}
                               chatSessionId={chatSessionIdRef.current!}
                             />
+
+                            {enterpriseSettings &&
+                              enterpriseSettings.custom_lower_disclaimer_content && (
+                                <div className="mobile:hidden mt-4 flex items-center justify-center relative w-[95%] mx-auto">
+                                  <div className="text-sm text-text-500 max-w-searchbar-max px-4 text-center">
+                                    <MinimalMarkdown
+                                      className=""
+                                      content={
+                                        enterpriseSettings.custom_lower_disclaimer_content
+                                      }
+                                    />
+                                  </div>
+                                </div>
+                              )}
+
+                            {enterpriseSettings &&
+                              enterpriseSettings.use_custom_logotype && (
+                                <div className="hidden lg:block absolute right-0 bottom-0">
+                                  <img
+                                    src={
+                                      "/api/enterprise-settings/logotype?u=" +
+                                      Date.now()
+                                    }
+                                    alt="logotype"
+                                    style={{ objectFit: "contain" }}
+                                    className="w-fit h-8"
+                                  />
+                                </div>
+                              )}
                           </div>
                         </div>
                       </div>
@@ -1710,7 +1897,7 @@ export function ChatPage({
               )}
             </div>
           </div>
-          <FixedLogo />
+          <FixedLogo toggleSidebar={toggleSidebar} />
         </div>
       </div>
       <DocumentSidebar

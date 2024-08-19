@@ -1,7 +1,13 @@
 "use client";
 
 import { FiEdit, FiFolderPlus } from "react-icons/fi";
-import { ForwardedRef, forwardRef, useContext, useEffect } from "react";
+import {
+  ForwardedRef,
+  forwardRef,
+  useContext,
+  useEffect,
+  useState,
+} from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ChatSession } from "../interfaces";
@@ -32,6 +38,9 @@ interface HistorySidebarProps {
   toggled?: boolean;
   removeToggle?: () => void;
   reset?: () => void;
+  showShareModal?: (chatSession: ChatSession) => void;
+  showDeleteModal?: (chatSession: ChatSession) => void;
+  stopGenerating?: () => void;
 }
 
 export const HistorySidebar = forwardRef<HTMLDivElement, HistorySidebarProps>(
@@ -46,11 +55,17 @@ export const HistorySidebar = forwardRef<HTMLDivElement, HistorySidebarProps>(
       openedFolders,
       toggleSidebar,
       removeToggle,
+      stopGenerating = () => null,
+      showShareModal,
+      showDeleteModal,
     },
     ref: ForwardedRef<HTMLDivElement>
   ) => {
     const router = useRouter();
     const { popup, setPopup } = usePopup();
+
+    // For determining intial focus state
+    const [newFolderId, setNewFolderId] = useState<number | null>(null);
 
     const currentChatId = currentChatSession?.id;
 
@@ -64,8 +79,6 @@ export const HistorySidebar = forwardRef<HTMLDivElement, HistorySidebarProps>(
     if (!combinedSettings) {
       return null;
     }
-
-    const enterpriseSettings = combinedSettings.enterpriseSettings;
 
     const handleNewChat = () => {
       reset();
@@ -129,8 +142,8 @@ export const HistorySidebar = forwardRef<HTMLDivElement, HistorySidebarProps>(
                 onClick={() =>
                   createFolder("New Folder")
                     .then((folderId) => {
-                      console.log(`Folder created with ID: ${folderId}`);
                       router.refresh();
+                      setNewFolderId(folderId);
                     })
                     .catch((error) => {
                       console.error("Failed to create folder:", error);
@@ -168,6 +181,10 @@ export const HistorySidebar = forwardRef<HTMLDivElement, HistorySidebarProps>(
           )}
           <div className="border-b border-border pb-4 mx-3" />
           <PagesTab
+            stopGenerating={stopGenerating}
+            newFolderId={newFolderId}
+            showDeleteModal={showDeleteModal}
+            showShareModal={showShareModal}
             closeSidebar={removeToggle}
             page={page}
             existingChats={existingChats}
