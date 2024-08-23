@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from danswer.access.models import DocumentAccess
 from danswer.connectors.models import Document
 from danswer.utils.logger import setup_logger
-from shared_configs.configs import ALT_INDEX_SUFFIX
+from shared_configs.enums import EmbeddingProvider
 from shared_configs.model_server_models import Embedding
 
 if TYPE_CHECKING:
@@ -100,8 +100,7 @@ class EmbeddingModelDetail(BaseModel):
     normalize: bool
     query_prefix: str | None
     passage_prefix: str | None
-    cloud_provider_id: int | None = None
-    cloud_provider_name: str | None = None
+    provider_type: EmbeddingProvider | None = None
 
     @classmethod
     def from_model(
@@ -109,12 +108,14 @@ class EmbeddingModelDetail(BaseModel):
         embedding_model: "EmbeddingModel",
     ) -> "EmbeddingModelDetail":
         return cls(
-            # When constructing EmbeddingModel Detail for user-facing flows, strip the
-            # unneeded additional data after the `_`s
-            model_name=embedding_model.model_name.removesuffix(ALT_INDEX_SUFFIX),
+            model_name=embedding_model.model_name,
             model_dim=embedding_model.model_dim,
             normalize=embedding_model.normalize,
             query_prefix=embedding_model.query_prefix,
             passage_prefix=embedding_model.passage_prefix,
-            cloud_provider_id=embedding_model.cloud_provider_id,
+            provider_type=embedding_model.provider_type,
         )
+
+
+class EmbeddingModelCreateRequest(EmbeddingModelDetail):
+    index_name: str

@@ -54,6 +54,7 @@ def translate_doc_response_to_simple_doc(
                 highlight for highlight in doc.match_highlights if highlight
             ],
             source_type=doc.source_type,
+            metadata=doc.metadata,
         )
         for doc in doc_response.top_documents
     ]
@@ -106,8 +107,9 @@ def handle_simplified_chat_message(
         search_doc_ids=chat_message_req.search_doc_ids,
         retrieval_options=retrieval_options,
         query_override=chat_message_req.query_override,
-        chunks_above=chat_message_req.chunks_above,
-        chunks_below=chat_message_req.chunks_below,
+        # Currently only applies to search flow not chat
+        chunks_above=0,
+        chunks_below=0,
         full_doc=chat_message_req.full_doc,
     )
 
@@ -226,14 +228,14 @@ def handle_send_message_simple_with_history(
     full_chat_msg_info = CreateChatMessageRequest(
         chat_session_id=chat_session.id,
         parent_message_id=chat_message.id,
-        message=rephrased_query,
+        message=query,
         file_descriptors=[],
         prompt_id=req.prompt_id,
         search_doc_ids=None,
         retrieval_options=req.retrieval_options,
         query_override=rephrased_query,
-        chunks_above=req.chunks_above,
-        chunks_below=req.chunks_below,
+        chunks_above=0,
+        chunks_below=0,
         full_doc=req.full_doc,
     )
 

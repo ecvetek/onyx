@@ -1,3 +1,4 @@
+import traceback
 from collections.abc import Callable
 from collections.abc import Iterator
 from functools import partial
@@ -269,6 +270,11 @@ def stream_chat_message_objects(
     3. [always] A set of streamed LLM tokens or an error anywhere along the line if something fails
     4. [always] Details on the final AI response message that is created
     """
+    # Currently surrounding context is not supported for chat
+    # Chat is already token heavy and harder for the model to process plus it would roll history over much faster
+    new_msg_req.chunks_above = 0
+    new_msg_req.chunks_below = 0
+
     try:
         user_id = user.id if user is not None else None
 
@@ -345,7 +351,15 @@ def stream_chat_message_objects(
             parent_message = root_message
 
         user_message = None
-        if not use_existing_user_message:
+
+        if new_msg_req.regenerate:
+            final_msg, history_msgs = create_chat_chain(
+                stop_at_message_id=parent_id,
+                chat_session_id=chat_session_id,
+                db_session=db_session,
+            )
+
+        elif not use_existing_user_message:
             # Create new message at the right place in the tree and update the parent's child pointer
             # Don't commit yet until we verify the chat message chain
             user_message = create_new_chat_message(
@@ -464,12 +478,18 @@ def stream_chat_message_objects(
             user_message_id=user_message.id if user_message else None,
             reserved_assistant_message_id=reserved_message_id,
         )
+
+        overridden_model = (
+            new_msg_req.llm_override.model_version if new_msg_req.llm_override else None
+        )
+
         # Cannot determine these without the LLM step or breaking out early
         partial_response = partial(
             create_new_chat_message,
             chat_session_id=chat_session_id,
             parent_message=final_msg,
             prompt_id=prompt_id,
+            overridden_model=overridden_model,
             # message=,
             # rephrased_query=,
             # token_count=,
@@ -711,10 +731,13 @@ def stream_chat_message_objects(
         error_msg = str(e)
         logger.exception(f"Failed to process chat message: {error_msg}")
 
+        stack_trace = traceback.format_exc()
         client_error_msg = litellm_exception_to_error_msg(e, llm)
         if llm.config.api_key and len(llm.config.api_key) > 2:
             error_msg = error_msg.replace(llm.config.api_key, "[REDACTED_API_KEY]")
-        yield StreamingError(error=client_error_msg, stack_trace=error_msg)
+            stack_trace = stack_trace.replace(llm.config.api_key, "[REDACTED_API_KEY]")
+
+        yield StreamingError(error=client_error_msg, stack_trace=stack_trace)
         db_session.rollback()
         return
 

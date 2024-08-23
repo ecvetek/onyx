@@ -167,12 +167,14 @@ export default function EmbeddingForm() {
   const onConfirm = async () => {
     let newModel: EmbeddingModelDescriptor;
 
-    if ("cloud_provider_name" in selectedProvider) {
+    if ("provider_type" in selectedProvider) {
       // This is a CloudEmbeddingModel
       newModel = {
         ...selectedProvider,
         model_name: selectedProvider.model_name,
-        cloud_provider_name: selectedProvider.cloud_provider_name,
+        provider_type: selectedProvider.provider_type
+          ?.toLowerCase()
+          .split(" ")[0],
       };
     } else {
       // This is an EmbeddingModelDescriptor
@@ -180,7 +182,7 @@ export default function EmbeddingForm() {
         ...selectedProvider,
         model_name: selectedProvider.model_name!,
         description: "",
-        cloud_provider_name: null,
+        provider_type: null,
       };
     }
 
@@ -311,11 +313,11 @@ export default function EmbeddingForm() {
           >
             <>
               <div className="text-lg">
-                {selectedProvider.model_name} is a low-performance model.
+                {selectedProvider.model_name} is a lower accuracy model.
                 <br />
                 We recommend the following alternatives.
-                <li>OpenAI for cloud-based</li>
-                <li>Nomic for self-hosted</li>
+                <li>Cohere embed-english-v3.0 for cloud-based</li>
+                <li>Nomic nomic-embed-text-v1 for self-hosted</li>
               </div>
               <div className="flex mt-4 justify-between">
                 <Button color="green" onClick={() => setShowPoorModel(false)}>

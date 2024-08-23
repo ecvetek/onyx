@@ -10,7 +10,6 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 from sqlalchemy.orm import Session
 
 from danswer.configs.constants import MessageType
-from danswer.configs.constants import SLACK_CHANNEL_ID
 from danswer.configs.danswerbot_configs import DANSWER_BOT_REPHRASE_MESSAGE
 from danswer.configs.danswerbot_configs import DANSWER_BOT_RESPOND_EVERY_CHANNEL
 from danswer.configs.danswerbot_configs import NOTIFY_SLACKBOT_NO_ANSWER
@@ -56,6 +55,7 @@ from danswer.server.manage.models import SlackBotTokens
 from danswer.utils.logger import setup_logger
 from shared_configs.configs import MODEL_SERVER_HOST
 from shared_configs.configs import MODEL_SERVER_PORT
+from shared_configs.configs import SLACK_CHANNEL_ID
 
 logger = setup_logger()
 
@@ -469,7 +469,7 @@ if __name__ == "__main__":
                     # or the tokens have updated (set up for the first time)
                     with Session(get_sqlalchemy_engine()) as db_session:
                         embedding_model = get_current_db_embedding_model(db_session)
-                        if embedding_model.cloud_provider_id is None:
+                        if embedding_model.provider_type is None:
                             warm_up_bi_encoder(
                                 embedding_model=embedding_model,
                                 model_server_host=MODEL_SERVER_HOST,
