@@ -1,44 +1,29 @@
 "use client";
 
 import React from "react";
-import { useState, useEffect } from "react";
 import useSWR from "swr";
 import { FetchError, errorHandlingFetcher } from "@/lib/fetcher";
 import { ErrorCallout } from "@/components/ErrorCallout";
 import { LoadingAnimation } from "@/components/Loading";
 import { usePopup } from "@/components/admin/connectors/Popup";
 import { ConnectorIndexingStatus } from "@/lib/types";
-import { getCurrentUser } from "@/lib/user";
-import { User, UserRole } from "@/lib/types";
-import { usePublicCredentials } from "@/lib/hooks";
-import { Title } from "@tremor/react";
-import { DriveJsonUploadSection, DriveOAuthSection } from "./Credential";
+import {
+  usePublicCredentials,
+  useConnectorCredentialIndexingStatus,
+} from "@/lib/hooks";
+import Title from "@/components/ui/title";
+import { DriveJsonUploadSection, DriveAuthSection } from "./Credential";
 import {
   Credential,
   GoogleDriveCredentialJson,
   GoogleDriveServiceAccountCredentialJson,
 } from "@/lib/connectors/credentials";
 import { GoogleDriveConfig } from "@/lib/connectors/connectors";
+import { useUser } from "@/components/user/UserProvider";
 
 const GDriveMain = ({}: {}) => {
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const isAdmin = currentUser?.role === UserRole.ADMIN;
+  const { isLoadingUser, isAdmin, user } = useUser();
 
-  useEffect(() => {
-    const fetchCurrentUser = async () => {
-      try {
-        const user = await getCurrentUser();
-        if (user) {
-          setCurrentUser(user);
-        } else {
-          console.error("Failed to fetch current user");
-        }
-      } catch (error) {
-        console.error("Error fetching current user:", error);
-      }
-    };
-    fetchCurrentUser();
-  }, []);
   const {
     data: appCredentialData,
     isLoading: isAppCredentialLoading,
@@ -61,10 +46,7 @@ const GDriveMain = ({}: {}) => {
     data: connectorIndexingStatuses,
     isLoading: isConnectorIndexingStatusesLoading,
     error: connectorIndexingStatusesError,
-  } = useSWR<ConnectorIndexingStatus<any, any>[], FetchError>(
-    "/api/manage/admin/connector/indexing-status",
-    errorHandlingFetcher
-  );
+  } = useConnectorCredentialIndexingStatus();
   const {
     data: credentialsData,
     isLoading: isCredentialsLoading,
@@ -80,6 +62,10 @@ const GDriveMain = ({}: {}) => {
   const serviceAccountKeySuccessfullyFetched =
     serviceAccountKeyData ||
     (isServiceAccountKeyError && isServiceAccountKeyError.status === 404);
+
+  if (isLoadingUser) {
+    return <></>;
+  }
 
   if (
     (!appCredentialSuccessfullyFetched && isAppCredentialLoading) ||
@@ -122,6 +108,7 @@ const GDriveMain = ({}: {}) => {
     | undefined = credentialsData.find(
     (credential) => credential.credential_json?.google_drive_service_account_key
   );
+
   const googleDriveConnectorIndexingStatuses: ConnectorIndexingStatus<
     GoogleDriveConfig,
     GoogleDriveCredentialJson
@@ -148,7 +135,7 @@ const GDriveMain = ({}: {}) => {
           <Title className="mb-2 mt-6 ml-auto mr-auto">
             Step 2: Authenticate with Danswer
           </Title>
-          <DriveOAuthSection
+          <DriveAuthSection
             setPopup={setPopup}
             refreshCredentials={refreshCredentials}
             googleDrivePublicCredential={googleDrivePublicCredential}
@@ -158,6 +145,7 @@ const GDriveMain = ({}: {}) => {
             appCredentialData={appCredentialData}
             serviceAccountKeyData={serviceAccountKeyData}
             connectorExists={googleDriveConnectorIndexingStatuses.length > 0}
+            user={user}
           />
         </>
       )}

@@ -1,12 +1,9 @@
 "use client";
 
-import ReactMarkdown from "react-markdown";
 import { SettingsContext } from "@/components/settings/SettingsProvider";
 import { useContext, useState, useRef, useLayoutEffect } from "react";
-import remarkGfm from "remark-gfm";
 import { Popover } from "@/components/popover/Popover";
 import { ChevronDownIcon } from "@/components/icons/icons";
-import { Divider } from "@tremor/react";
 import { MinimalMarkdown } from "@/components/chat_search/MinimalMarkdown";
 
 export function ChatBanner() {
@@ -19,9 +16,13 @@ export function ChatBanner() {
   useLayoutEffect(() => {
     const checkOverflow = () => {
       if (contentRef.current && fullContentRef.current) {
-        setIsOverflowing(
-          fullContentRef.current.scrollHeight > contentRef.current.clientHeight
-        );
+        const contentRect = contentRef.current.getBoundingClientRect();
+        const fullContentRect = fullContentRef.current.getBoundingClientRect();
+
+        const isWidthOverflowing = fullContentRect.width > contentRect.width;
+        const isHeightOverflowing = fullContentRect.height > contentRect.height;
+
+        setIsOverflowing(isWidthOverflowing || isHeightOverflowing);
       }
     };
 
@@ -34,27 +35,6 @@ export function ChatBanner() {
     return null;
   }
 
-  const renderMarkdown = (className: string) => (
-    <ReactMarkdown
-      className={`w-full text-wrap break-word ${className}`}
-      components={{
-        a: ({ node, ...props }) => (
-          <a
-            {...props}
-            className="text-sm text-link hover:text-link-hover"
-            target="_blank"
-            rel="noopener noreferrer"
-          />
-        ),
-        p: ({ node, ...props }) => (
-          <p {...props} className="text-wrap break-word text-sm m-0 w-full" />
-        ),
-      }}
-      remarkPlugins={[remarkGfm]}
-    >
-      {settings.enterpriseSettings?.custom_header_content}
-    </ReactMarkdown>
-  );
   return (
     <div
       className={`
@@ -65,10 +45,11 @@ export function ChatBanner() {
         w-full
         mx-auto
         relative
-        bg-background-100
+        cursor-default
         shadow-sm
         rounded
         border-l-8 border-l-400
+        bg-background
         border-r-4 border-r-200
         border-border
         border
@@ -76,25 +57,29 @@ export function ChatBanner() {
     >
       <div className="text-emphasis text-sm w-full">
         <div className="relative">
-          <div
-            ref={contentRef}
-            className="line-clamp-2 text-center w-full overflow-hidden pr-8"
-          >
-            <MinimalMarkdown
-              className=""
-              content={settings.enterpriseSettings.custom_header_content}
-            />
+          <div className={`flex justify-center w-full overflow-hidden pr-8`}>
+            <div
+              ref={contentRef}
+              className={`overflow-hidden ${settings.enterpriseSettings.two_lines_for_chat_header ? "line-clamp-2" : "line-clamp-1"} text-center max-w-full`}
+            >
+              <MinimalMarkdown
+                className="prose text-sm max-w-full"
+                content={settings.enterpriseSettings.custom_header_content}
+              />
+            </div>
           </div>
-          <div
-            ref={fullContentRef}
-            className="absolute top-0 left-0 invisible w-full"
-          >
-            <MinimalMarkdown
-              className=""
-              content={settings.enterpriseSettings.custom_header_content}
-            />
+          <div className="absolute top-0 left-0 invisible flex justify-center max-w-full">
+            <div
+              ref={fullContentRef}
+              className={`overflow-hidden invisible ${settings.enterpriseSettings.two_lines_for_chat_header ? "line-clamp-2" : "line-clamp-1"} text-center max-w-full`}
+            >
+              <MinimalMarkdown
+                className="prose text-sm max-w-full"
+                content={settings.enterpriseSettings.custom_header_content}
+              />
+            </div>
           </div>
-          <div className="absolute bottom-0 right-0 ">
+          <div className="absolute bottom-0 right-0">
             {isOverflowing && (
               <Popover
                 open={isPopoverOpen}

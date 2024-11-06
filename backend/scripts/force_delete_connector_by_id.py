@@ -83,8 +83,7 @@ def _unsafe_deletion(
     # Delete index attempts
     delete_index_attempts(
         db_session=db_session,
-        connector_id=connector_id,
-        credential_id=credential_id,
+        cc_pair_id=cc_pair.id,
     )
 
     # Delete document sets
@@ -206,6 +205,8 @@ def _delete_connector(cc_pair_id: int, db_session: Session) -> None:
         for file_name in file_names:
             logger.notice(f"Deleting file {file_name}")
             file_store.delete_file(file_name)
+
+    db_session.commit()
 
 
 if __name__ == "__main__":

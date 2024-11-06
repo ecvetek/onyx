@@ -1,3 +1,4 @@
+import io
 import json
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -7,6 +8,7 @@ from typing import TYPE_CHECKING
 from typing import Union
 
 import litellm  # type: ignore
+import pandas as pd
 import tiktoken
 from langchain.prompts.base import StringPromptValue
 from langchain.prompts.chat import ChatPromptValue
@@ -30,10 +32,9 @@ from litellm.exceptions import Timeout  # type: ignore
 from litellm.exceptions import UnprocessableEntityError  # type: ignore
 
 from danswer.configs.constants import MessageType
-from danswer.configs.model_configs import GEN_AI_MAX_OUTPUT_TOKENS
 from danswer.configs.model_configs import GEN_AI_MAX_TOKENS
-from danswer.configs.model_configs import GEN_AI_MODEL_DEFAULT_MAX_TOKENS
-from danswer.configs.model_configs import GEN_AI_MODEL_PROVIDER
+from danswer.configs.model_configs import GEN_AI_MODEL_FALLBACK_MAX_TOKENS
+from danswer.configs.model_configs import GEN_AI_NUM_RESERVED_OUTPUT_TOKENS
 from danswer.db.models import ChatMessage
 from danswer.file_store.models import ChatFileType
 from danswer.file_store.models import InMemoryChatFile
@@ -48,7 +49,9 @@ if TYPE_CHECKING:
 logger = setup_logger()
 
 
-def litellm_exception_to_error_msg(e: Exception, llm: LLM) -> str:
+def litellm_exception_to_error_msg(
+    e: Exception, llm: LLM, fallback_to_error_msg: bool = False
+) -> str:
     error_msg = str(e)
 
     if isinstance(e, BadRequestError):
@@ -95,7 +98,7 @@ def litellm_exception_to_error_msg(e: Exception, llm: LLM) -> str:
         error_msg = "Request timed out: The operation took too long to complete. Please try again."
     elif isinstance(e, APIError):
         error_msg = f"API error: An error occurred while communicating with the API. Details: {str(e)}"
-    else:
+    elif not fallback_to_error_msg:
         error_msg = "An unexpected error occurred while processing your request. Please try again later."
     return error_msg
 
@@ -106,11 +109,10 @@ def translate_danswer_msg_to_langchain(
     files: list[InMemoryChatFile] = []
 
     # If the message is a `ChatMessage`, it doesn't have the downloaded files
-    # attached. Just ignore them for now. Also, OpenAI doesn't allow files to
-    # be attached to AI messages, so we must remove them
-    if not isinstance(msg, ChatMessage) and msg.message_type != MessageType.ASSISTANT:
+    # attached. Just ignore them for now.
+    if not isinstance(msg, ChatMessage):
         files = msg.files
-    content = build_content_with_imgs(msg.message, files)
+    content = build_content_with_imgs(msg.message, files, message_type=msg.message_type)
 
     if msg.message_type == MessageType.SYSTEM:
         raise ValueError("System messages are not currently part of history")
@@ -134,6 +136,18 @@ def translate_history_to_basemessages(
     return history_basemessages, history_token_counts
 
 
+def _process_csv_file(file: InMemoryChatFile) -> str:
+    df = pd.read_csv(io.StringIO(file.content.decode("utf-8")))
+    csv_preview = df.head().to_string()
+
+    file_name_section = (
+        f"CSV FILE NAME: {file.filename}\n"
+        if file.filename
+        else "CSV FILE (NO NAME PROVIDED):\n"
+    )
+    return f"{file_name_section}{CODE_BLOCK_PAT.format(csv_preview)}\n\n\n"
+
+
 def _build_content(
     message: str,
     files: list[InMemoryChatFile] | None = None,
@@ -144,16 +158,26 @@ def _build_content(
         if files
         else None
     )
-    if not text_files:
+
+    csv_files = (
+        [file for file in files if file.file_type == ChatFileType.CSV]
+        if files
+        else None
+    )
+
+    if not text_files and not csv_files:
         return message
 
     final_message_with_files = "FILES:\n\n"
-    for file in text_files:
+    for file in text_files or []:
         file_content = file.content.decode("utf-8")
         file_name_section = f"DOCUMENT: {file.filename}\n" if file.filename else ""
         final_message_with_files += (
             f"{file_name_section}{CODE_BLOCK_PAT.format(file_content.strip())}\n\n\n"
         )
+    for file in csv_files or []:
+        final_message_with_files += _process_csv_file(file)
+
     final_message_with_files += message
 
     return final_message_with_files
@@ -163,10 +187,19 @@ def build_content_with_imgs(
     message: str,
     files: list[InMemoryChatFile] | None = None,
     img_urls: list[str] | None = None,
+    message_type: MessageType = MessageType.USER,
 ) -> str | list[str | dict[str, Any]]:  # matching Langchain's BaseMessage content type
     files = files or []
-    img_files = [file for file in files if file.file_type == ChatFileType.IMAGE]
+
+    # Only include image files for user messages
+    img_files = (
+        [file for file in files if file.file_type == ChatFileType.IMAGE]
+        if message_type == MessageType.USER
+        else []
+    )
+
     img_urls = img_urls or []
+
     message_main_content = _build_content(message, files)
 
     if not img_files and not img_urls:
@@ -200,6 +233,28 @@ def build_content_with_imgs(
             for url in img_urls
         ],
     )
+
+
+def message_to_prompt_and_imgs(message: BaseMessage) -> tuple[str, list[str]]:
+    if isinstance(message.content, str):
+        return message.content, []
+
+    imgs = []
+    texts = []
+    for part in message.content:
+        if isinstance(part, dict):
+            if part.get("type") == "image_url":
+                img_url = part.get("image_url", {}).get("url")
+                if img_url:
+                    imgs.append(img_url)
+            elif part.get("type") == "text":
+                text = part.get("text")
+                if text:
+                    texts.append(text)
+        else:
+            texts.append(part)
+
+    return "".join(texts), imgs
 
 
 def dict_based_prompt_to_langchain_prompt(
@@ -331,36 +386,99 @@ def test_llm(llm: LLM) -> str | None:
 def get_llm_max_tokens(
     model_map: dict,
     model_name: str,
-    model_provider: str = GEN_AI_MODEL_PROVIDER,
+    model_provider: str,
 ) -> int:
     """Best effort attempt to get the max tokens for the LLM"""
     if GEN_AI_MAX_TOKENS:
         # This is an override, so always return this
+        logger.info(f"Using override GEN_AI_MAX_TOKENS: {GEN_AI_MAX_TOKENS}")
         return GEN_AI_MAX_TOKENS
 
     try:
         model_obj = model_map.get(f"{model_provider}/{model_name}")
+        if model_obj:
+            logger.debug(f"Using model object for {model_provider}/{model_name}")
+
         if not model_obj:
-            model_obj = model_map[model_name]
+            model_obj = model_map.get(model_name)
+            if model_obj:
+                logger.debug(f"Using model object for {model_name}")
+
+        if not model_obj:
+            model_name_split = model_name.split("/")
+            if len(model_name_split) > 1:
+                model_obj = model_map.get(model_name_split[1])
+            if model_obj:
+                logger.debug(f"Using model object for {model_name_split[1]}")
+
+        if not model_obj:
+            raise RuntimeError(
+                f"No litellm entry found for {model_provider}/{model_name}"
+            )
 
         if "max_input_tokens" in model_obj:
-            return model_obj["max_input_tokens"]
+            max_tokens = model_obj["max_input_tokens"]
+            logger.info(
+                f"Max tokens for {model_name}: {max_tokens} (from max_input_tokens)"
+            )
+            return max_tokens
 
         if "max_tokens" in model_obj:
-            return model_obj["max_tokens"]
+            max_tokens = model_obj["max_tokens"]
+            logger.info(f"Max tokens for {model_name}: {max_tokens} (from max_tokens)")
+            return max_tokens
 
+        logger.error(f"No max tokens found for LLM: {model_name}")
         raise RuntimeError("No max tokens found for LLM")
     except Exception:
         logger.exception(
-            f"Failed to get max tokens for LLM with name {model_name}. Defaulting to {GEN_AI_MODEL_DEFAULT_MAX_TOKENS}."
+            f"Failed to get max tokens for LLM with name {model_name}. Defaulting to {GEN_AI_MODEL_FALLBACK_MAX_TOKENS}."
         )
-        return GEN_AI_MODEL_DEFAULT_MAX_TOKENS
+        return GEN_AI_MODEL_FALLBACK_MAX_TOKENS
+
+
+def get_llm_max_output_tokens(
+    model_map: dict,
+    model_name: str,
+    model_provider: str,
+) -> int:
+    """Best effort attempt to get the max output tokens for the LLM"""
+    try:
+        model_obj = model_map.get(f"{model_provider}/{model_name}")
+        if not model_obj:
+            model_obj = model_map[model_name]
+            logger.debug(f"Using model object for {model_name}")
+        else:
+            logger.debug(f"Using model object for {model_provider}/{model_name}")
+
+        if "max_output_tokens" in model_obj:
+            max_output_tokens = model_obj["max_output_tokens"]
+            logger.info(f"Max output tokens for {model_name}: {max_output_tokens}")
+            return max_output_tokens
+
+        # Fallback to a fraction of max_tokens if max_output_tokens is not specified
+        if "max_tokens" in model_obj:
+            max_output_tokens = int(model_obj["max_tokens"] * 0.1)
+            logger.info(
+                f"Fallback max output tokens for {model_name}: {max_output_tokens} (10% of max_tokens)"
+            )
+            return max_output_tokens
+
+        logger.error(f"No max output tokens found for LLM: {model_name}")
+        raise RuntimeError("No max output tokens found for LLM")
+    except Exception:
+        default_output_tokens = int(GEN_AI_MODEL_FALLBACK_MAX_TOKENS)
+        logger.exception(
+            f"Failed to get max output tokens for LLM with name {model_name}. "
+            f"Defaulting to {default_output_tokens} (fallback max tokens)."
+        )
+        return default_output_tokens
 
 
 def get_max_input_tokens(
     model_name: str,
     model_provider: str,
-    output_tokens: int = GEN_AI_MAX_OUTPUT_TOKENS,
+    output_tokens: int = GEN_AI_NUM_RESERVED_OUTPUT_TOKENS,
 ) -> int:
     # NOTE: we previously used `litellm.get_max_tokens()`, but despite the name, this actually
     # returns the max OUTPUT tokens. Under the hood, this uses the `litellm.model_cost` dict,

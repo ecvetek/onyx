@@ -6,8 +6,9 @@ import {
 } from "@/components/admin/connectors/Field";
 import { createApiKey, updateApiKey } from "./lib";
 import { Modal } from "@/components/Modal";
-import { XIcon } from "@/components/icons/icons";
-import { Button, Divider, Text } from "@tremor/react";
+import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
+import Text from "@/components/ui/text";
 import { UserRole } from "@/lib/types";
 import { APIKey } from "./types";
 
@@ -28,21 +29,12 @@ export const DanswerApiKeyForm = ({
 
   return (
     <Modal onOutsideClick={onClose} width="w-2/6">
-      <div className="px-8 py-6 bg-background">
+      <>
         <h2 className="text-xl font-bold flex">
           {isUpdate ? "Update API Key" : "Create a new API Key"}
-          <div
-            onClick={onClose}
-            className="ml-auto hover:bg-hover p-1.5 rounded"
-          >
-            <XIcon
-              size={20}
-              className="my-auto flex flex-shrink-0 cursor-pointer"
-            />
-          </div>
         </h2>
 
-        <Divider />
+        <Separator />
 
         <Formik
           initialValues={{
@@ -108,28 +100,25 @@ export const DanswerApiKeyForm = ({
 
               <BooleanFormField
                 small
-                noPadding
+                removeIndent
                 alignTop
                 name="is_admin"
                 label="Is Admin?"
                 subtext="If set, this API key will have access to admin level server API's."
               />
 
-              <div className="flex">
-                <Button
-                  type="submit"
-                  size="xs"
-                  color="green"
-                  disabled={isSubmitting}
-                  className="mx-auto w-64"
-                >
-                  {isUpdate ? "Update!" : "Create!"}
-                </Button>
-              </div>
+              <Button
+                type="submit"
+                size="sm"
+                variant="submit"
+                disabled={isSubmitting}
+              >
+                {isUpdate ? "Update!" : "Create!"}
+              </Button>
             </Form>
           )}
         </Formik>
-      </div>
+      </>
     </Modal>
   );
 };

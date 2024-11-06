@@ -1,26 +1,29 @@
-import { Dispatch, SetStateAction, useState, useEffect, useRef } from "react";
-import { ModalWrapper } from "@/components/modals/ModalWrapper";
-import { Badge, Text } from "@tremor/react";
+import { Dispatch, SetStateAction, useEffect, useRef } from "react";
+import { Modal } from "@/components/Modal";
+import Text from "@/components/ui/text";
 import { getDisplayNameForModel, LlmOverride } from "@/lib/hooks";
 import { LLMProviderDescriptor } from "@/app/admin/configuration/llm/interfaces";
 
 import { destructureValue, structureValue } from "@/lib/llm/utils";
 import { setUserDefaultModel } from "@/lib/users/UserSettings";
 import { useRouter } from "next/navigation";
-import { usePopup } from "@/components/admin/connectors/Popup";
+import { PopupSpec } from "@/components/admin/connectors/Popup";
+import { useUser } from "@/components/user/UserProvider";
 
 export function SetDefaultModelModal({
+  setPopup,
   llmProviders,
   onClose,
   setLlmOverride,
   defaultModel,
 }: {
+  setPopup: (popupSpec: PopupSpec | null) => void;
   llmProviders: LLMProviderDescriptor[];
   setLlmOverride: Dispatch<SetStateAction<LlmOverride>>;
   onClose: () => void;
   defaultModel: string | null;
 }) {
-  const { popup, setPopup } = usePopup();
+  const { refreshUser } = useUser();
   const containerRef = useRef<HTMLDivElement>(null);
   const messageRef = useRef<HTMLDivElement>(null);
 
@@ -103,6 +106,7 @@ export function SetDefaultModelModal({
           message: "Default model updated successfully",
           type: "success",
         });
+        refreshUser();
         router.refresh();
       } else {
         throw new Error("Failed to update default model");
@@ -119,12 +123,8 @@ export function SetDefaultModelModal({
   );
 
   return (
-    <ModalWrapper
-      onClose={onClose}
-      modalClassName="rounded-lg  bg-white max-w-xl"
-    >
+    <Modal onOutsideClick={onClose} width="rounded-lg  bg-white max-w-xl">
       <>
-        {popup}
         <div className="flex mb-4">
           <h2 className="text-2xl text-emphasis font-bold flex my-auto">
             Set Default Model
@@ -166,7 +166,9 @@ export function SetDefaultModelModal({
                 <td className="p-2">
                   System default{" "}
                   {defaultProvider?.default_model_name &&
-                    `(${getDisplayNameForModel(defaultProvider?.default_model_name)})`}
+                    `(${getDisplayNameForModel(
+                      defaultProvider?.default_model_name
+                    )})`}
                 </td>
               }
             </div>
@@ -200,6 +202,6 @@ export function SetDefaultModelModal({
           </div>
         </div>
       </>
-    </ModalWrapper>
+    </Modal>
   );
 }

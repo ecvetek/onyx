@@ -21,9 +21,12 @@ class LLMConfig(BaseModel):
     model_provider: str
     model_name: str
     temperature: float
-    api_key: str | None
-    api_base: str | None
-    api_version: str | None
+    api_key: str | None = None
+    api_base: str | None = None
+    api_version: str | None = None
+    deployment_name: str | None = None
+    # This disables the "model_" protected namespace for pydantic
+    model_config = {"protected_namespaces": ()}
 
 
 def log_prompt(prompt: LanguageModelInput) -> None:
@@ -85,11 +88,14 @@ class LLM(abc.ABC):
         prompt: LanguageModelInput,
         tools: list[dict] | None = None,
         tool_choice: ToolChoiceOptions | None = None,
+        structured_response_format: dict | None = None,
     ) -> BaseMessage:
         self._precall(prompt)
         # TODO add a postcall to log model outputs independent of concrete class
         # implementation
-        return self._invoke_implementation(prompt, tools, tool_choice)
+        return self._invoke_implementation(
+            prompt, tools, tool_choice, structured_response_format
+        )
 
     @abc.abstractmethod
     def _invoke_implementation(
@@ -97,6 +103,7 @@ class LLM(abc.ABC):
         prompt: LanguageModelInput,
         tools: list[dict] | None = None,
         tool_choice: ToolChoiceOptions | None = None,
+        structured_response_format: dict | None = None,
     ) -> BaseMessage:
         raise NotImplementedError
 
@@ -105,11 +112,14 @@ class LLM(abc.ABC):
         prompt: LanguageModelInput,
         tools: list[dict] | None = None,
         tool_choice: ToolChoiceOptions | None = None,
+        structured_response_format: dict | None = None,
     ) -> Iterator[BaseMessage]:
         self._precall(prompt)
         # TODO add a postcall to log model outputs independent of concrete class
         # implementation
-        return self._stream_implementation(prompt, tools, tool_choice)
+        return self._stream_implementation(
+            prompt, tools, tool_choice, structured_response_format
+        )
 
     @abc.abstractmethod
     def _stream_implementation(
@@ -117,5 +127,6 @@ class LLM(abc.ABC):
         prompt: LanguageModelInput,
         tools: list[dict] | None = None,
         tool_choice: ToolChoiceOptions | None = None,
+        structured_response_format: dict | None = None,
     ) -> Iterator[BaseMessage]:
         raise NotImplementedError

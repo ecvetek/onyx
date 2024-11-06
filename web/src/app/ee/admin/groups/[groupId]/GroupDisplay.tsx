@@ -1,7 +1,7 @@
 "use client";
 
 import { usePopup } from "@/components/admin/connectors/Popup";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { ConnectorTitle } from "@/components/admin/connectors/ConnectorTitle";
 import { AddMemberForm } from "./AddMemberForm";
 import { updateUserGroup, updateCuratorStatus } from "./lib";
@@ -11,27 +11,33 @@ import {
   User,
   UserGroup,
   UserRole,
+  USER_ROLE_LABELS,
 } from "@/lib/types";
 import { AddConnectorForm } from "./AddConnectorForm";
+import { Separator } from "@/components/ui/separator";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import Text from "@/components/ui/text";
 import {
   Table,
-  TableHead,
-  TableRow,
-  TableHeaderCell,
   TableBody,
   TableCell,
-  Divider,
-  Button,
-  Text,
-  Select,
-  SelectItem,
-} from "@tremor/react";
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Button } from "@/components/ui/button";
 import { DeleteButton } from "@/components/DeleteButton";
 import { Bubble } from "@/components/Bubble";
 import { BookmarkIcon, RobotIcon } from "@/components/icons/icons";
 import { AddTokenRateLimitForm } from "./AddTokenRateLimitForm";
 import { GenericTokenRateLimitTable } from "@/app/admin/token-rate-limits/TokenRateLimitTables";
-import { getCurrentUser } from "@/lib/user";
+import { useUser } from "@/components/user/UserProvider";
 
 interface GroupDisplayProps {
   users: User[];
@@ -94,19 +100,25 @@ const UserRoleDropdown = ({
 
   if (isEditable) {
     return (
-      <div className="w-40 ">
+      <div className="w-40">
+        Select group
         <Select
           value={localRole}
           onValueChange={handleChange}
           disabled={isSettingRole}
         >
-          <SelectItem value={UserRole.BASIC}>Basic</SelectItem>
-          <SelectItem value={UserRole.CURATOR}>Curator</SelectItem>
+          <SelectTrigger>
+            <SelectValue placeholder="Select role" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={UserRole.BASIC}>Basic</SelectItem>
+            <SelectItem value={UserRole.CURATOR}>Curator</SelectItem>
+          </SelectContent>
         </Select>
       </div>
     );
   } else {
-    return <div>{user.role}</div>;
+    return <div>{USER_ROLE_LABELS[localRole]}</div>;
   }
 };
 
@@ -120,23 +132,12 @@ export const GroupDisplay = ({
   const [addMemberFormVisible, setAddMemberFormVisible] = useState(false);
   const [addConnectorFormVisible, setAddConnectorFormVisible] = useState(false);
   const [addRateLimitFormVisible, setAddRateLimitFormVisible] = useState(false);
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const isAdmin = currentUser?.role === UserRole.ADMIN;
-  useEffect(() => {
-    const fetchCurrentUser = async () => {
-      try {
-        const user = await getCurrentUser();
-        if (user) {
-          setCurrentUser(user);
-        } else {
-          console.error("Failed to fetch current user");
-        }
-      } catch (error) {
-        console.error("Error fetching current user:", error);
-      }
-    };
-    fetchCurrentUser();
-  }, []);
+
+  const { isLoadingUser, isAdmin } = useUser();
+  if (isLoadingUser) {
+    return <></>;
+  }
+
   const handlePopup = (message: string, type: "success" | "error") => {
     setPopup({ message, type });
   };
@@ -161,7 +162,7 @@ export const GroupDisplay = ({
         )}
       </div>
 
-      <Divider />
+      <Separator />
 
       <div className="flex w-full">
         <h2 className="text-xl font-bold">Users</h2>
@@ -171,27 +172,25 @@ export const GroupDisplay = ({
         {userGroup.users.length > 0 ? (
           <>
             <Table className="overflow-visible">
-              <TableHead>
+              <TableHeader>
                 <TableRow>
-                  <TableHeaderCell>Email</TableHeaderCell>
-                  <TableHeaderCell>Role</TableHeaderCell>
-                  {isAdmin && (
-                    <TableHeaderCell className="flex w-full">
-                      <div className="ml-auto">Remove User</div>
-                    </TableHeaderCell>
-                  )}
+                  <TableHead>Email</TableHead>
+                  <TableHead>Role</TableHead>
+                  <TableHead className="flex w-full">
+                    <div className="ml-auto">Remove User</div>
+                  </TableHead>
                 </TableRow>
-              </TableHead>
+              </TableHeader>
               <TableBody>
-                {userGroup.users.map((user) => {
+                {userGroup.users.map((groupMember) => {
                   return (
-                    <TableRow key={user.id}>
+                    <TableRow key={groupMember.id}>
                       <TableCell className="whitespace-normal break-all">
-                        {user.email}
+                        {groupMember.email}
                       </TableCell>
                       <TableCell>
                         <UserRoleDropdown
-                          user={user}
+                          user={groupMember}
                           group={userGroup}
                           onSuccess={onRoleChangeSuccess}
                           onError={onRoleChangeError}
@@ -201,7 +200,10 @@ export const GroupDisplay = ({
                       <TableCell>
                         <div className="flex w-full">
                           <div className="ml-auto m-2">
-                            {isAdmin && (
+                            {(isAdmin ||
+                              !userGroup.curator_ids.includes(
+                                groupMember.id
+                              )) && (
                               <DeleteButton
                                 onClick={async () => {
                                   const response = await updateUserGroup(
@@ -210,7 +212,7 @@ export const GroupDisplay = ({
                                       user_ids: userGroup.users
                                         .filter(
                                           (userGroupUser) =>
-                                            userGroupUser.id !== user.id
+                                            userGroupUser.id !== groupMember.id
                                         )
                                         .map(
                                           (userGroupUser) => userGroupUser.id
@@ -254,17 +256,15 @@ export const GroupDisplay = ({
         )}
       </div>
 
-      {isAdmin && (
-        <Button
-          className="mt-3"
-          size="xs"
-          color="green"
-          onClick={() => setAddMemberFormVisible(true)}
-          disabled={!userGroup.is_up_to_date}
-        >
-          Add Users
-        </Button>
-      )}
+      <Button
+        className="mt-3"
+        size="sm"
+        variant="submit"
+        onClick={() => setAddMemberFormVisible(true)}
+        disabled={!userGroup.is_up_to_date}
+      >
+        Add Users
+      </Button>
 
       {addMemberFormVisible && (
         <AddMemberForm
@@ -278,21 +278,21 @@ export const GroupDisplay = ({
         />
       )}
 
-      <Divider />
+      <Separator />
 
       <h2 className="text-xl font-bold mt-8">Connectors</h2>
       <div className="mt-2">
         {userGroup.cc_pairs.length > 0 ? (
           <>
             <Table className="overflow-visible">
-              <TableHead>
+              <TableHeader>
                 <TableRow>
-                  <TableHeaderCell>Connector</TableHeaderCell>
-                  <TableHeaderCell className="flex w-full">
+                  <TableHead>Connector</TableHead>
+                  <TableHead className="flex w-full">
                     <div className="ml-auto">Remove Connector</div>
-                  </TableHeaderCell>
+                  </TableHead>
                 </TableRow>
-              </TableHead>
+              </TableHeader>
               <TableBody>
                 {userGroup.cc_pairs.map((ccPair) => {
                   return (
@@ -355,17 +355,15 @@ export const GroupDisplay = ({
         )}
       </div>
 
-      {isAdmin && (
-        <Button
-          className="mt-3"
-          onClick={() => setAddConnectorFormVisible(true)}
-          size="xs"
-          color="green"
-          disabled={!userGroup.is_up_to_date}
-        >
-          Add Connectors
-        </Button>
-      )}
+      <Button
+        className="mt-3"
+        onClick={() => setAddConnectorFormVisible(true)}
+        size="sm"
+        variant="submit"
+        disabled={!userGroup.is_up_to_date}
+      >
+        Add Connectors
+      </Button>
 
       {addConnectorFormVisible && (
         <AddConnectorForm
@@ -379,7 +377,7 @@ export const GroupDisplay = ({
         />
       )}
 
-      <Divider />
+      <Separator />
 
       <h2 className="text-xl font-bold mt-8 mb-2">Document Sets</h2>
 
@@ -404,9 +402,9 @@ export const GroupDisplay = ({
         )}
       </div>
 
-      <Divider />
+      <Separator />
 
-      <h2 className="text-xl font-bold mt-8 mb-2">Personas</h2>
+      <h2 className="text-xl font-bold mt-8 mb-2">Assistants</h2>
 
       <div>
         {userGroup.document_sets.length > 0 ? (
@@ -424,12 +422,12 @@ export const GroupDisplay = ({
           </div>
         ) : (
           <>
-            <Text>No Personas in this group...</Text>
+            <Text>No Assistants in this group...</Text>
           </>
         )}
       </div>
 
-      <Divider />
+      <Separator />
 
       <h2 className="text-xl font-bold mt-8 mb-2">Token Rate Limits</h2>
 
@@ -448,8 +446,8 @@ export const GroupDisplay = ({
 
       {isAdmin && (
         <Button
-          color="green"
-          size="xs"
+          variant="submit"
+          size="sm"
           className="mt-3"
           onClick={() => setAddRateLimitFormVisible(true)}
         >

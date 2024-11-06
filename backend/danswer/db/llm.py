@@ -4,8 +4,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from danswer.db.models import CloudEmbeddingProvider as CloudEmbeddingProviderModel
+from danswer.db.models import DocumentSet
 from danswer.db.models import LLMProvider as LLMProviderModel
 from danswer.db.models import LLMProvider__UserGroup
+from danswer.db.models import SearchSettings
+from danswer.db.models import Tool as ToolModel
 from danswer.db.models import User
 from danswer.db.models import User__UserGroup
 from danswer.server.manage.embedding.models import CloudEmbeddingProvider
@@ -46,10 +49,11 @@ def upsert_cloud_embedding_provider(
         .first()
     )
     if existing_provider:
-        for key, value in provider.dict().items():
+        for key, value in provider.model_dump().items():
             setattr(existing_provider, key, value)
     else:
-        new_provider = CloudEmbeddingProviderModel(**provider.dict())
+        new_provider = CloudEmbeddingProviderModel(**provider.model_dump())
+
         db_session.add(new_provider)
         existing_provider = new_provider
     db_session.commit()
@@ -58,7 +62,8 @@ def upsert_cloud_embedding_provider(
 
 
 def upsert_llm_provider(
-    db_session: Session, llm_provider: LLMProviderUpsertRequest
+    llm_provider: LLMProviderUpsertRequest,
+    db_session: Session,
 ) -> FullLLMProvider:
     existing_llm_provider = db_session.scalar(
         select(LLMProviderModel).where(LLMProviderModel.name == llm_provider.name)
@@ -78,6 +83,7 @@ def upsert_llm_provider(
     existing_llm_provider.model_names = llm_provider.model_names
     existing_llm_provider.is_public = llm_provider.is_public
     existing_llm_provider.display_model_names = llm_provider.display_model_names
+    existing_llm_provider.deployment_name = llm_provider.deployment_name
 
     if not existing_llm_provider.id:
         # If its not already in the db, we need to generate an ID by flushing
@@ -89,16 +95,31 @@ def upsert_llm_provider(
         group_ids=llm_provider.groups,
         db_session=db_session,
     )
+    full_llm_provider = FullLLMProvider.from_model(existing_llm_provider)
 
     db_session.commit()
 
-    return FullLLMProvider.from_model(existing_llm_provider)
+    return full_llm_provider
 
 
 def fetch_existing_embedding_providers(
     db_session: Session,
 ) -> list[CloudEmbeddingProviderModel]:
     return list(db_session.scalars(select(CloudEmbeddingProviderModel)).all())
+
+
+def fetch_existing_doc_sets(
+    db_session: Session, doc_ids: list[int]
+) -> list[DocumentSet]:
+    return list(
+        db_session.scalars(select(DocumentSet).where(DocumentSet.id.in_(doc_ids))).all()
+    )
+
+
+def fetch_existing_tools(db_session: Session, tool_ids: list[int]) -> list[ToolModel]:
+    return list(
+        db_session.scalars(select(ToolModel).where(ToolModel.id.in_(tool_ids))).all()
+    )
 
 
 def fetch_existing_llm_providers(
@@ -158,10 +179,17 @@ def remove_embedding_provider(
     db_session: Session, provider_type: EmbeddingProvider
 ) -> None:
     db_session.execute(
+        delete(SearchSettings).where(SearchSettings.provider_type == provider_type)
+    )
+
+    # Delete the embedding provider
+    db_session.execute(
         delete(CloudEmbeddingProviderModel).where(
             CloudEmbeddingProviderModel.provider_type == provider_type
         )
     )
+
+    db_session.commit()
 
 
 def remove_llm_provider(db_session: Session, provider_id: int) -> None:
@@ -178,7 +206,7 @@ def remove_llm_provider(db_session: Session, provider_id: int) -> None:
     db_session.commit()
 
 
-def update_default_provider(db_session: Session, provider_id: int) -> None:
+def update_default_provider(provider_id: int, db_session: Session) -> None:
     new_default = db_session.scalar(
         select(LLMProviderModel).where(LLMProviderModel.id == provider_id)
     )

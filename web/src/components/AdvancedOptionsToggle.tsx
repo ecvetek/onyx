@@ -1,5 +1,5 @@
 import React from "react";
-import { Button } from "@tremor/react";
+import { Button } from "@/components/ui/button";
 import { FiChevronDown, FiChevronRight } from "react-icons/fi";
 
 interface AdvancedOptionsToggleProps {
@@ -12,15 +12,17 @@ export function AdvancedOptionsToggle({
   setShowAdvancedOptions,
 }: AdvancedOptionsToggleProps) {
   return (
-    <Button
-      type="button"
-      variant="light"
-      size="xs"
-      icon={showAdvancedOptions ? FiChevronDown : FiChevronRight}
-      onClick={() => setShowAdvancedOptions(!showAdvancedOptions)}
-      className="mb-4 text-xs text-text-500 hover:text-text-400"
-    >
-      Advanced Options
-    </Button>
+    <div>
+      <Button
+        type="button"
+        variant="link"
+        size="sm"
+        icon={showAdvancedOptions ? FiChevronDown : FiChevronRight}
+        onClick={() => setShowAdvancedOptions(!showAdvancedOptions)}
+        className="text-xs text-text-950 hover:text-text-500"
+      >
+        Advanced Options
+      </Button>
+    </div>
   );
 }

@@ -1,4 +1,4 @@
-import { DateRangePickerValue } from "@tremor/react";
+import { DateRangePickerValue } from "@/app/ee/admin/performance/DateRangeSelector";
 import { Tag, ValidSources } from "../types";
 import { Persona } from "@/app/admin/assistants/interfaces";
 
@@ -17,6 +17,15 @@ export type SearchType = (typeof SearchType)[keyof typeof SearchType];
 
 export interface AnswerPiecePacket {
   answer_piece: string;
+}
+
+export enum StreamStopReason {
+  CONTEXT_LENGTH = "CONTEXT_LENGTH",
+  CANCELLED = "CANCELLED",
+}
+
+export interface StreamStopInfo {
+  stop_reason: StreamStopReason;
 }
 
 export interface ErrorMessagePacket {
@@ -143,7 +152,7 @@ export interface SearchRequestArgs {
   updateError: (error: string) => void;
   updateMessageAndThreadId: (
     messageId: number,
-    chat_session_id: number
+    chat_session_id: string
   ) => void;
   finishedSearching: () => void;
   updateComments: (comments: any) => void;

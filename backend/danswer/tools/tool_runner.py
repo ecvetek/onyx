@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from collections.abc import Generator
 from typing import Any
 
@@ -5,8 +6,8 @@ from danswer.llm.answering.models import PreviousMessage
 from danswer.llm.interfaces import LLM
 from danswer.tools.models import ToolCallFinalResult
 from danswer.tools.models import ToolCallKickoff
+from danswer.tools.models import ToolResponse
 from danswer.tools.tool import Tool
-from danswer.tools.tool import ToolResponse
 from danswer.utils.threadpool_concurrency import run_functions_tuples_in_parallel
 
 
@@ -47,7 +48,7 @@ class ToolRunner:
 def check_which_tools_should_run_for_non_tool_calling_llm(
     tools: list[Tool], query: str, history: list[PreviousMessage], llm: LLM
 ) -> list[dict[str, Any] | None]:
-    tool_args_list = [
+    tool_args_list: list[tuple[Callable[..., Any], tuple[Any, ...]]] = [
         (tool.get_args_for_non_tool_calling_llm, (query, history, llm))
         for tool in tools
     ]

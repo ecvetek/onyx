@@ -15,7 +15,6 @@ import {
   ArrowSquareOut,
 } from "@phosphor-icons/react";
 import {
-  FiCheck,
   FiChevronsDown,
   FiChevronsUp,
   FiEdit2,
@@ -30,28 +29,22 @@ import {
   FiChevronRight,
   FiChevronLeft,
   FiAlertTriangle,
-  FiZoomIn,
   FiCopy,
-  FiBookmark,
   FiCpu,
   FiInfo,
-  FiUploadCloud,
-  FiUser,
-  FiUsers,
   FiBarChart2,
-  FiDatabase,
-  FiSlack,
 } from "react-icons/fi";
 import { SiBookstack } from "react-icons/si";
-import Image from "next/image";
+import Image, { StaticImageData } from "next/image";
 import jiraSVG from "../../../public/Jira.svg";
 import confluenceSVG from "../../../public/Confluence.svg";
 import openAISVG from "../../../public/Openai.svg";
 import openSourceIcon from "../../../public/OpenSource.png";
+import litellmIcon from "../../../public/LiteLLM.jpg";
 
 import awsWEBP from "../../../public/Amazon.webp";
 import azureIcon from "../../../public/Azure.png";
-
+import asanaIcon from "../../../public/Asana.png";
 import anthropicSVG from "../../../public/Anthropic.svg";
 import nomicSVG from "../../../public/nomic.svg";
 import microsoftIcon from "../../../public/microsoft.png";
@@ -61,7 +54,6 @@ import OCIStorageSVG from "../../../public/OCI.svg";
 import googleCloudStorageIcon from "../../../public/GoogleCloudStorage.png";
 import guruIcon from "../../../public/Guru.svg";
 import gongIcon from "../../../public/Gong.png";
-import requestTrackerIcon from "../../../public/RequestTracker.png";
 import zulipIcon from "../../../public/Zulip.png";
 import linearIcon from "../../../public/Linear.png";
 import hubSpotIcon from "../../../public/HubSpot.png";
@@ -74,6 +66,7 @@ import slackIcon from "../../../public/Slack.png";
 import s3Icon from "../../../public/S3.png";
 import r2Icon from "../../../public/r2.png";
 import salesforceIcon from "../../../public/Salesforce.png";
+import freshdeskIcon from "../../../public/Freshdesk.png";
 
 import sharepointIcon from "../../../public/Sharepoint.png";
 import teamsIcon from "../../../public/Teams.png";
@@ -85,13 +78,30 @@ import clickupIcon from "../../../public/Clickup.svg";
 import cohereIcon from "../../../public/Cohere.svg";
 import voyageIcon from "../../../public/Voyage.png";
 import googleIcon from "../../../public/Google.webp";
-
+import xenforoIcon from "../../../public/Xenforo.svg";
 import { FaRobot } from "react-icons/fa";
 
 export interface IconProps {
   size?: number;
   className?: string;
 }
+
+export interface LogoIconProps extends IconProps {
+  src: string | StaticImageData;
+}
+
+export const LogoIcon = ({
+  size = 16,
+  className = defaultTailwindCSS,
+  src,
+}: LogoIconProps) => (
+  <div
+    style={{ width: `${size}px`, height: `${size}px` }}
+    className={`w-[${size}px] h-[${size}px] ` + className}
+  >
+    <Image src={src} alt="Logo" width="96" height="96" />
+  </div>
+);
 
 export const AssistantsIconSkeleton = ({
   size,
@@ -171,36 +181,6 @@ export const AssistantsIcon = ({
   );
 };
 
-// export const AssistantsIcon = ({
-//   size,
-//   className = defaultTailwindCSS,
-// }: IconProps) => {
-//   return (
-//     <svg
-//       style={{ width: `${size}px`, height: `${size}px` }}
-//       className={`w-[${size}px] h-[${size}px] ` + className}
-//       xmlns="http://www.w3.org/2000/svg"
-//       width="200"
-//       height="200"
-//       viewBox="0 0 24 24"
-//     >
-//       <g fill="none" stroke="currentColor" strokeWidth="1.5">
-//         <path
-//           strokeLinecap="round"
-//           d="M21.483 19c-.04.936-.165 1.51-.569 1.914c-.586.586-1.528.586-3.414.586c-1.886 0-2.828 0-3.414-.586c-.586-.586-.586-1.528-.586-3.414v-2c0-1.886 0-2.828.586-3.414c.586-.586 1.528-.586 3.414-.586c1.886 0 2.828 0 3.414.586c.532.531.581 1.357.585 2.914"
-//         />
-//         <path d="M2 8.5c0 1.886 0 2.828.586 3.414c.586.586 1.528.586 3.414.586c1.886 0 2.828 0 3.414-.586C10 11.328 10 10.386 10 8.5v-2c0-1.886 0-2.828-.586-3.414C8.828 2.5 7.886 2.5 6 2.5c-1.886 0-2.828 0-3.414.586C2 3.672 2 4.614 2 6.5v2Z" />
-//         <path
-//           strokeLinecap="round"
-//           d="M15.5 2.513c-.327.017-.562.055-.765.14a2 2 0 0 0-1.083 1.082c-.152.367-.152.833-.152 1.765c0 .932 0 1.398.152 1.765a2 2 0 0 0 1.083 1.083c.367.152.833.152 1.765.152h2c.932 0 1.398 0 1.765-.152a2 2 0 0 0 1.083-1.083c.152-.367.152-.833.152-1.765c0-.932 0-1.398-.152-1.765a2 2 0 0 0-1.083-1.083c-.204-.084-.438-.122-.765-.139"
-//         />
-//         <path d="M2 18.5c0 .932 0 1.398.152 1.765a2 2 0 0 0 1.083 1.083c.367.152.833.152 1.765.152h2c.932 0 1.398 0 1.765-.152a2 2 0 0 0 1.083-1.083C10 19.898 10 19.432 10 18.5c0-.932 0-1.398-.152-1.765a2 2 0 0 0-1.083-1.083C8.398 15.5 7.932 15.5 7 15.5H5c-.932 0-1.398 0-1.765.152a2 2 0 0 0-1.083 1.083C2 17.102 2 17.568 2 18.5Z" />
-//       </g>
-//     </svg>
-
-//   );
-// };
-
 <svg
   xmlns="http://www.w3.org/2000/svg"
   width="200"
@@ -263,6 +243,20 @@ export const ColorSlackIcon = ({
       className={`w-[${size}px] h-[${size}px] ` + className}
     >
       <Image src={slackIcon} alt="Logo" width="96" height="96" />
+    </div>
+  );
+};
+
+export const LiteLLMIcon = ({
+  size = 16,
+  className = defaultTailwindCSS,
+}: IconProps) => {
+  return (
+    <div
+      style={{ width: `${size + 4}px`, height: `${size + 4}px` }}
+      className={`w-[${size + 4}px] h-[${size + 4}px] -m-0.5 ` + className}
+    >
+      <Image src={litellmIcon} alt="Logo" width="96" height="96" />
     </div>
   );
 };
@@ -659,9 +653,9 @@ export const MagnifyingIcon = ({
     >
       <path
         fill="currentColor"
-        fill-rule="evenodd"
+        fillRule="evenodd"
         d="M9.965 11.026a5 5 0 1 1 1.06-1.06l2.755 2.754a.75.75 0 1 1-1.06 1.06zM10.5 7a3.5 3.5 0 1 1-7 0a3.5 3.5 0 0 1 7 0"
-        clip-rule="evenodd"
+        clipRule="evenodd"
       />
     </svg>
   );
@@ -682,9 +676,9 @@ export const ToggleDown = ({
     >
       <path
         fill="currentColor"
-        fill-rule="evenodd"
+        fillRule="evenodd"
         d="M4.22 6.22a.75.75 0 0 1 1.06 0L8 8.94l2.72-2.72a.75.75 0 1 1 1.06 1.06l-3.25 3.25a.75.75 0 0 1-1.06 0L4.22 7.28a.75.75 0 0 1 0-1.06"
-        clip-rule="evenodd"
+        clipRule="evenodd"
       />
     </svg>
   );
@@ -705,9 +699,9 @@ export const ToggleUp = ({
     >
       <path
         fill="currentColor"
-        fill-rule="evenodd"
+        fillRule="evenodd"
         d="M11.78 9.78a.75.75 0 0 1-1.06 0L8 7.06L5.28 9.78a.75.75 0 0 1-1.06-1.06l3.25-3.25a.75.75 0 0 1 1.06 0l3.25 3.25a.75.75 0 0 1 0 1.06"
-        clip-rule="evenodd"
+        clipRule="evenodd"
       />
     </svg>
   );
@@ -773,7 +767,7 @@ export const StarFeedback = ({
         stroke="currentColor"
         strokeLinecap="round"
         strokeLinejoin="round"
-        stroke-width="1.5"
+        strokeWidth="1.5"
         d="m12.495 18.587l4.092 2.15a1.044 1.044 0 0 0 1.514-1.106l-.783-4.552a1.045 1.045 0 0 1 .303-.929l3.31-3.226a1.043 1.043 0 0 0-.575-1.785l-4.572-.657A1.044 1.044 0 0 1 15 7.907l-2.088-4.175a1.044 1.044 0 0 0-1.88 0L8.947 7.907a1.044 1.044 0 0 1-.783.575l-4.51.657a1.044 1.044 0 0 0-.584 1.785l3.309 3.226a1.044 1.044 0 0 1 .303.93l-.783 4.55a1.044 1.044 0 0 0 1.513 1.107l4.093-2.15a1.043 1.043 0 0 1 .991 0"
       />
     </svg>
@@ -798,7 +792,7 @@ export const DislikeFeedback = ({
         stroke="currentColor"
         strokeLinecap="round"
         strokeLinejoin="round"
-        stroke-width="1.5"
+        strokeWidth="1.5"
       >
         <path d="M5.75 2.75H4.568c-.98 0-1.775.795-1.775 1.776v8.284c0 .98.795 1.775 1.775 1.775h1.184c.98 0 1.775-.794 1.775-1.775V4.526c0-.98-.795-1.776-1.775-1.776" />
         <path d="m21.16 11.757l-1.42-7.101a2.368 2.368 0 0 0-2.367-1.906h-7.48a2.367 2.367 0 0 0-2.367 2.367v7.101a3.231 3.231 0 0 0 1.184 2.367l.982 5.918a.887.887 0 0 0 1.278.65l1.1-.543a3.551 3.551 0 0 0 1.87-4.048l-.496-1.965h5.396a2.368 2.368 0 0 0 2.32-2.84" />
@@ -825,7 +819,7 @@ export const LikeFeedback = ({
         stroke="currentColor"
         strokeLinecap="round"
         strokeLinejoin="round"
-        stroke-width="1.5"
+        strokeWidth="1.5"
       >
         <path d="M5.75 9.415H4.568c-.98 0-1.775.794-1.775 1.775v8.284c0 .98.795 1.776 1.775 1.776h1.184c.98 0 1.775-.795 1.775-1.776V11.19c0-.98-.795-1.775-1.775-1.775" />
         <path d="m21.16 12.243l-1.42 7.101a2.367 2.367 0 0 1-2.367 1.906h-7.48a2.367 2.367 0 0 1-2.367-2.367v-7.101A3.231 3.231 0 0 1 8.71 9.415l.982-5.918a.888.888 0 0 1 1.278-.65l1.1.544a3.55 3.55 0 0 1 1.87 4.047l-.496 1.965h5.396a2.367 2.367 0 0 1 2.32 2.84" />
@@ -957,6 +951,29 @@ export const SearchIcon = ({
   );
 };
 
+export const BellIcon = ({
+  size = 16,
+  className = defaultTailwindCSS,
+}: IconProps) => {
+  return (
+    <svg
+      style={{ width: `${size}px`, height: `${size}px` }}
+      className={`w-[${size}px] h-[${size}px] ` + className}
+      xmlns="http://www.w3.org/2000/svg"
+      width="200"
+      height="200"
+      viewBox="0 0 24 24"
+    >
+      <path
+        fill="currentColor"
+        fill-rule="evenodd"
+        d="M12 1.25A7.75 7.75 0 0 0 4.25 9v.704a3.53 3.53 0 0 1-.593 1.958L2.51 13.385c-1.334 2-.316 4.718 2.003 5.35c.755.206 1.517.38 2.284.523l.002.005C7.567 21.315 9.622 22.75 12 22.75s4.433-1.435 5.202-3.487l.002-.005a28.472 28.472 0 0 0 2.284-.523c2.319-.632 3.337-3.35 2.003-5.35l-1.148-1.723a3.53 3.53 0 0 1-.593-1.958V9A7.75 7.75 0 0 0 12 1.25Zm3.376 18.287a28.46 28.46 0 0 1-6.753 0c.711 1.021 1.948 1.713 3.377 1.713c1.429 0 2.665-.692 3.376-1.713ZM5.75 9a6.25 6.25 0 1 1 12.5 0v.704c0 .993.294 1.964.845 2.79l1.148 1.723a2.02 2.02 0 0 1-1.15 3.071a26.96 26.96 0 0 1-14.187 0a2.021 2.021 0 0 1-1.15-3.07l1.15-1.724a5.03 5.03 0 0 0 .844-2.79V9Z"
+        clip-rule="evenodd"
+      />
+    </svg>
+  );
+};
+
 export const LightSettingsIcon = ({
   size = 16,
   className = defaultTailwindCSS,
@@ -984,103 +1001,53 @@ export const LightSettingsIcon = ({
   );
 };
 
-//
 //  COMPANY LOGOS
-//
 
 export const LoopioIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size}px`, height: `${size}px` }}
-      className={`w-[${size}px] h-[${size}px] dark:invert ` + className}
-    >
-      <Image src="/Loopio.png" alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon
+    size={size}
+    className={`${className} dark:invert`}
+    src="/Loopio.png"
+  />
+);
 
 export const NewIconTest = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <svg
-      style={{ width: `${size}px`, height: `${size}px` }}
-      className={`w-[${size}px] h-[${size}px] ` + className}
-      xmlns="http://www.w3.org/2000/svg"
-      width="200"
-      height="200"
-      viewBox="0 0 24 24"
-    >
-      <g fill="none" stroke="currentColor" strokeWidth="1.5">
-        <path
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          d="M2.75 8.917h18.5"
-        />
-        <rect width="18.5" height="18.5" x="2.75" y="2.75" rx="6" />
-      </g>
-    </svg>
-  );
-};
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src="/NewIconTest.svg" />
+);
 
 export const GitlabIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size}px`, height: `${size}px` }}
-      className={`w-[${size}px] h-[${size}px] ` + className}
-    >
-      <Image src="/Gitlab.png" alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src="/Gitlab.png" />
+);
+
 export const GithubIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size}px`, height: `${size}px` }}
-      className={`w-[${size}px] h-[${size}px] ` + className}
-    >
-      <Image src="/Github.png" alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src="/Github.png" />
+);
 
 export const GmailIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size}px`, height: `${size}px` }}
-      className={`w-[${size}px] h-[${size}px] ` + className}
-    >
-      <Image src="/Gmail.png" alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src="/Gmail.png" />
+);
 
 export const GoogleDriveIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size}px`, height: `${size}px` }}
-      className={`w-[${size}px] h-[${size}px] ` + className}
-    >
-      <Image src="/GoogleDrive.png" alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src="/GoogleDrive.png" />
+);
 
 export const BookstackIcon = ({
   size = 16,
@@ -1092,438 +1059,238 @@ export const BookstackIcon = ({
 export const ConfluenceIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size + 4}px`, height: `${size + 4}px` }}
-      className={`w-[${size + 4}px] h-[${size + 4}px] -m-0.5 ` + className}
-    >
-      <Image src={confluenceSVG} alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon
+    size={size + 4}
+    className={`${className} -m-0.5`}
+    src={confluenceSVG}
+  />
+);
 
 export const OCIStorageIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size + 4}px`, height: `${size + 4}px` }}
-      className={`w-[${size + 4}px] h-[${size + 4}px] -m-0.5 ` + className}
-    >
-      <Image src={OCIStorageSVG} alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon
+    size={size + 4}
+    className={`${className} -m-0.5`}
+    src={OCIStorageSVG}
+  />
+);
 
 export const JiraIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  // Jira Icon has a bit more surrounding whitespace than other icons, which is why we need to adjust it here
-  return (
-    <div
-      style={{ width: `${size + 4}px`, height: `${size + 4}px` }}
-      className={`w-[${size + 4}px] h-[${size + 4}px] -m-0.5 ` + className}
-    >
-      <Image src={jiraSVG} alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon size={size + 4} className={`${className} -m-0.5`} src={jiraSVG} />
+);
 
 export const ZulipIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size}px`, height: `${size}px` }}
-      className={`w-[${size}px] h-[${size}px] ` + className}
-    >
-      <Image src={zulipIcon} alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => <LogoIcon size={size} className={className} src={zulipIcon} />;
 
 export const OpenAIIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size}px`, height: `${size}px` }}
-      className={`w-[${size}px] h-[${size}px] ` + className}
-    >
-      <Image src={openAISVG} alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => <LogoIcon size={size} className={className} src={openAISVG} />;
 
 export const VoyageIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size}px`, height: `${size}px` }}
-      className={`w-[${size}px] h-[${size}px] ` + className}
-    >
-      <Image src={voyageIcon} alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src={voyageIcon} />
+);
 
 export const GoogleIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size}px`, height: `${size}px` }}
-      className={`w-[${size}px] h-[${size}px] ` + className}
-    >
-      <Image src={googleIcon} alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src={googleIcon} />
+);
 
 export const CohereIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size}px`, height: `${size}px` }}
-      className={`w-[${size}px] h-[${size}px] ` + className}
-    >
-      <Image src={cohereIcon} alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src={cohereIcon} />
+);
 
 export const GoogleStorageIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size + 4}px`, height: `${size + 4}px` }}
-      className={`w-[${size + 4}px] h-[${size + 4}px] -m-0.5 ` + className}
-    >
-      <Image src={googleCloudStorageIcon} alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon
+    size={size + 4}
+    className={`${className} -m-0.5`}
+    src={googleCloudStorageIcon}
+  />
+);
 
 export const ProductboardIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size}px`, height: `${size}px` }}
-      className={`w-[${size}px] h-[${size}px] ` + className}
-    >
-      <Image src="/Productboard.webp" alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src="/Productboard.webp" />
+);
 
 export const AWSIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      // Linear Icon has a bit more surrounding whitespace than other icons, which is why we need to adjust it here
-      style={{ width: `${size + 4}px`, height: `${size + 4}px` }}
-      className={`w-[${size + 4}px] h-[${size + 4}px] -m-0.5 ` + className}
-    >
-      <Image src={awsWEBP} alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => <LogoIcon size={size} className={className} src={awsWEBP} />;
 
 export const AzureIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      // Linear Icon has a bit more surrounding whitespace than other icons, which is why we need to adjust it here
-      style={{ width: `${size + 4}px`, height: `${size + 4}px` }}
-      className={`w-[${size + 4}px] h-[${size + 4}px] -m-0.5 ` + className}
-    >
-      <Image src={azureIcon} alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => <LogoIcon size={size} className={className} src={azureIcon} />;
 
 export const LinearIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      // Linear Icon has a bit more surrounding whitespace than other icons, which is why we need to adjust it here
-      style={{ width: `${size + 4}px`, height: `${size + 4}px` }}
-      className={`w-[${size + 4}px] h-[${size + 4}px] -m-0.5 ` + className}
-    >
-      <Image src={linearIcon} alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src={linearIcon} />
+);
 
 export const SlabIcon = ({
   size = 16,
   className = defaultTailwindCSS,
 }: IconProps) => (
-  <div
-    style={{ width: `${size}px`, height: `${size}px` }}
-    className={`w-[${size}px] h-[${size}px] ` + className}
-  >
-    <Image src="/SlabLogo.png" alt="Logo" width="96" height="96" />
-  </div>
+  <LogoIcon size={size} className={className} src="/SlabLogo.png" />
 );
 
 export const NotionIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size}px`, height: `${size}px` }}
-      className={`w-[${size}px] h-[${size}px] ` + className}
-    >
-      <Image src="/Notion.png" alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src="/Notion.png" />
+);
 
 export const GuruIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => (
-  <div
-    style={{ width: `${size}px`, height: `${size}px` }}
-    className={`w-[${size}px] h-[${size}px] ` + className}
-  >
-    <Image src={guruIcon} alt="Logo" width="96" height="96" />
-  </div>
-);
-
-export const RequestTrackerIcon = ({
-  size = 16,
-  className = defaultTailwindCSS,
-}: IconProps) => (
-  <div
-    style={{ width: `${size}px`, height: `${size}px` }}
-    className={`w-[${size}px] h-[${size}px] ` + className}
-  >
-    <Image src={requestTrackerIcon} alt="Logo" width="96" height="96" />
-  </div>
-);
+}: IconProps) => <LogoIcon size={size} className={className} src={guruIcon} />;
 
 export const SalesforceIcon = ({
   size = 16,
   className = defaultTailwindCSS,
 }: IconProps) => (
-  <div
-    style={{ width: `${size}px`, height: `${size}px` }}
-    className={`w-[${size}px] h-[${size}px] ` + className}
-  >
-    <Image src={salesforceIcon} alt="Logo" width="96" height="96" />
-  </div>
+  <LogoIcon size={size} className={className} src={salesforceIcon} />
 );
 
 export const R2Icon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => (
-  <div
-    style={{ width: `${size}px`, height: `${size}px` }}
-    className={`w-[${size}px] h-[${size}px] ` + className}
-  >
-    <Image src={r2Icon} alt="Logo" width="96" height="96" />
-  </div>
-);
+}: IconProps) => <LogoIcon size={size} className={className} src={r2Icon} />;
 
 export const S3Icon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => (
-  <div
-    style={{ width: `${size}px`, height: `${size}px` }}
-    className={`w-[${size}px] h-[${size}px] ` + className}
-  >
-    <Image src={s3Icon} alt="Logo" width="96" height="96" />
-  </div>
-);
+}: IconProps) => <LogoIcon size={size} className={className} src={s3Icon} />;
 
 export const SharepointIcon = ({
   size = 16,
   className = defaultTailwindCSS,
 }: IconProps) => (
-  <div
-    style={{ width: `${size}px`, height: `${size}px` }}
-    className={`w-[${size}px] h-[${size}px] ` + className}
-  >
-    <Image src={sharepointIcon} alt="Logo" width="96" height="96" />
-  </div>
+  <LogoIcon size={size} className={className} src={sharepointIcon} />
 );
 
 export const TeamsIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => (
-  <div
-    style={{ width: `${size}px`, height: `${size}px` }}
-    className={`w-[${size}px] h-[${size}px] ` + className}
-  >
-    <Image src={teamsIcon} alt="Logo" width="96" height="96" />
-  </div>
-);
+}: IconProps) => <LogoIcon size={size} className={className} src={teamsIcon} />;
 
 export const GongIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => (
-  <div
-    style={{ width: `${size}px`, height: `${size}px` }}
-    className={`w-[${size}px] h-[${size}px] ` + className}
-  >
-    <Image src={gongIcon} alt="Logo" width="96" height="96" />
-  </div>
-);
+}: IconProps) => <LogoIcon size={size} className={className} src={gongIcon} />;
 
 export const HubSpotIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      // HubSpot Icon has a bit more surrounding whitespace than other icons, which is why we need to adjust it here
-      style={{ width: `${size + 4}px`, height: `${size + 4}px` }}
-      className={`w-[${size + 4}px] h-[${size + 4}px] -m-0.5 ` + className}
-    >
-      <Image src={hubSpotIcon} alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src={hubSpotIcon} />
+);
 
 export const Document360Icon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size + 4}px`, height: `${size + 4}px` }}
-      className={`w-[${size + 4}px] h-[${size + 4}px] -m-0.5 ` + className}
-    >
-      <Image src={document360Icon} alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src={document360Icon} />
+);
 
 export const GoogleSitesIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size}px`, height: `${size}px` }}
-      className={`w-[${size}px] h-[${size}px] ` + className}
-    >
-      <Image src={googleSitesIcon} alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src={googleSitesIcon} />
+);
 
 export const ZendeskIcon = ({
   size = 16,
   className = defaultTailwindCSS,
 }: IconProps) => (
-  <div
-    style={{ width: `${size}px`, height: `${size}px` }}
-    className={`w-[${size}px] h-[${size}px] ` + className}
-  >
-    <Image src={zendeskIcon} alt="Logo" width="96" height="96" />
-  </div>
+  <LogoIcon size={size} className={className} src={zendeskIcon} />
 );
 
 export const DropboxIcon = ({
   size = 16,
   className = defaultTailwindCSS,
 }: IconProps) => (
-  <div
-    style={{ width: `${size}px`, height: `${size}px` }}
-    className={`w-[${size}px] h-[${size}px] ` + className}
-  >
-    <Image src={dropboxIcon} alt="Logo" width="96" height="96" />
-  </div>
+  <LogoIcon size={size} className={className} src={dropboxIcon} />
 );
 
 export const DiscourseIcon = ({
   size = 16,
   className = defaultTailwindCSS,
 }: IconProps) => (
-  <div
-    style={{ width: `${size}px`, height: `${size}px` }}
-    className={`w-[${size}px] h-[${size}px] ` + className}
-  >
-    <Image src={discourseIcon} alt="Logo" width="96" height="96" />
-  </div>
+  <LogoIcon size={size} className={className} src={discourseIcon} />
 );
 
 export const AxeroIcon = ({
   size = 16,
   className = defaultTailwindCSS,
 }: IconProps) => (
-  <div
-    style={{ width: `${size}px`, height: `${size}px` }}
-    className={`w-[${size}px] h-[${size}px] ` + className}
-  >
-    <Image src="/Axero.jpeg" alt="Logo" width="96" height="96" />
-  </div>
+  <LogoIcon size={size} className={className} src="/Axero.jpeg" />
 );
 
 export const ClickupIcon = ({
   size = 16,
   className = defaultTailwindCSS,
-}: IconProps) => {
-  return (
-    <div
-      style={{ width: `${size + 4}px`, height: `${size + 4}px` }}
-      className={`w-[${size + 4}px] h-[${size + 4}px] -m-0.5 ` + className}
-    >
-      <Image src={clickupIcon} alt="Logo" width="96" height="96" />
-    </div>
-  );
-};
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src={clickupIcon} />
+);
 
 export const MediaWikiIcon = ({
   size = 16,
   className = defaultTailwindCSS,
 }: IconProps) => (
-  <div
-    style={{ width: `${size}px`, height: `${size}px` }}
-    className={`w-[${size}px] h-[${size}px] ` + className}
-  >
-    <Image src={mediawikiIcon} alt="Logo" width="96" height="96" />
-  </div>
+  <LogoIcon size={size} className={className} src={mediawikiIcon} />
 );
 
 export const WikipediaIcon = ({
   size = 16,
   className = defaultTailwindCSS,
 }: IconProps) => (
-  <div
-    style={{ width: `${size}px`, height: `${size}px` }}
-    className={`w-[${size}px] h-[${size}px] ` + className}
-  >
-    <Image src={wikipediaIcon} alt="Logo" width="96" height="96" />
-  </div>
+  <LogoIcon size={size} className={className} src={wikipediaIcon} />
+);
+
+export const XenforoIcon = ({
+  size = 16,
+  className = defaultTailwindCSS,
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src={xenforoIcon} />
+);
+
+export const AsanaIcon = ({
+  size = 16,
+  className = defaultTailwindCSS,
+}: IconProps) => <LogoIcon size={size} className={className} src={asanaIcon} />;
+
+export const FreshdeskIcon = ({
+  size = 16,
+  className = defaultTailwindCSS,
+}: IconProps) => (
+  <LogoIcon size={size} className={className} src={freshdeskIcon} />
 );
 
 /* 
@@ -1834,9 +1601,9 @@ export const FilledLikeIcon = ({
     >
       <path
         fill="currentColor"
-        fill-rule="evenodd"
+        fillRule="evenodd"
         d="M4.41 12.961a2.5 2.5 0 0 0 1.076.244h5.346a2.5 2.5 0 0 0 2.47-2.114l.626-4.003a2 2 0 0 0-1.976-2.31H8.67V2.422a1.625 1.625 0 0 0-3.044-.794l-2.077 3.71a1.5 1.5 0 0 0-.191.733v5.442a1.5 1.5 0 0 0 .854 1.354l.2.095Zm-3.366-7.44a.996.996 0 0 0-.997.996v5.112a.997.997 0 0 0 .997.997h.496a.5.5 0 0 0 .5-.5V6.02a.5.5 0 0 0-.5-.5h-.496Z"
-        clip-rule="evenodd"
+        clipRule="evenodd"
       />
     </svg>
   );
@@ -1857,9 +1624,9 @@ export const StopGeneratingIcon = ({
     >
       <path
         fill="currentColor"
-        fill-rule="evenodd"
+        fillRule="evenodd"
         d="M1.5 0A1.5 1.5 0 0 0 0 1.5v11A1.5 1.5 0 0 0 1.5 14h11a1.5 1.5 0 0 0 1.5-1.5v-11A1.5 1.5 0 0 0 12.5 0z"
-        clip-rule="evenodd"
+        clipRule="evenodd"
       />
     </svg>
   );
@@ -2604,7 +2371,7 @@ export const SwapIcon = ({
         stroke="currentColor"
         strokeLinecap="round"
         strokeLinejoin="round"
-        stroke-width="1.5"
+        strokeWidth="1.5"
       >
         <path d="M3.53 11.47v2.118a4.235 4.235 0 0 0 4.235 4.236H20.47M3.53 6.176h12.705a4.235 4.235 0 0 1 4.236 4.236v2.117" />
         <path d="m17.294 14.647l3.177 3.176L17.294 21M6.706 9.353L3.529 6.176L6.706 3" />
@@ -2655,7 +2422,7 @@ export const PinIcon = ({
         stroke="currentColor"
         strokeLinecap="round"
         strokeLinejoin="round"
-        stroke-width="1.5"
+        strokeWidth="1.5"
         d="m17.942 6.076l2.442 2.442a1.22 1.22 0 0 1-.147 1.855l-1.757.232a1.697 1.697 0 0 0-.94.452c-.72.696-1.453 1.428-2.674 2.637c-.21.212-.358.478-.427.769l-.94 3.772a1.22 1.22 0 0 1-1.978.379l-3.04-3.052l-3.052-3.04a1.221 1.221 0 0 1 .379-1.978l3.747-.964a1.8 1.8 0 0 0 .77-.44c1.379-1.355 1.88-1.855 2.66-2.698c.233-.25.383-.565.428-.903l.232-1.783a1.221 1.221 0 0 1 1.856-.146zm-9.51 9.498L3.256 20.75"
       />
     </svg>
@@ -2680,7 +2447,7 @@ export const TwoRightArrowIcons = ({
         stroke="currentColor"
         strokeLinecap="round"
         strokeLinejoin="round"
-        stroke-width="1.5"
+        strokeWidth="1.5"
         d="m5.36 19l5.763-5.763a1.738 1.738 0 0 0 0-2.474L5.36 5m7 14l5.763-5.763a1.738 1.738 0 0 0 0-2.474L12.36 5"
       />
     </svg>
@@ -2724,6 +2491,195 @@ export const MinusIcon = ({
       <path
         fill="currentColor"
         d="M3.75 7.25a.75.75 0 0 0 0 1.5h8.5a.75.75 0 0 0 0-1.5z"
+      />
+    </svg>
+  );
+};
+
+export const CameraIcon = ({
+  size = 16,
+  className = defaultTailwindCSS,
+}: IconProps) => {
+  return (
+    <svg
+      style={{ width: `${size}px`, height: `${size}px` }}
+      className={`w-[${size}px] h-[${size}px] ` + className}
+      xmlns="http://www.w3.org/2000/svg"
+      width="200"
+      height="200"
+      viewBox="0 0 14 14"
+    >
+      <g
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M13.5 5a1 1 0 0 0-1-1h-2L9 2H5L3.5 4h-2a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1z" />
+        <path d="M7 9.75a2.25 2.25 0 1 0 0-4.5a2.25 2.25 0 0 0 0 4.5" />
+      </g>
+    </svg>
+  );
+};
+
+export const MacIcon = ({
+  size = 16,
+  className = "my-auto flex flex-shrink-0 ",
+}: IconProps) => {
+  return (
+    <svg
+      style={{ width: `${size}px`, height: `${size}px` }}
+      className={`w-[${size}px] h-[${size}px] ` + className}
+      xmlns="http://www.w3.org/2000/svg"
+      width="200"
+      height="200"
+      viewBox="0 0 24 24"
+    >
+      <path
+        fill="currentColor"
+        d="M6.5 4.5a2 2 0 0 1 2 2v2h-2a2 2 0 1 1 0-4Zm4 4v-2a4 4 0 1 0-4 4h2v3h-2a4 4 0 1 0 4 4v-2h3v2a4 4 0 1 0 4-4h-2v-3h2a4 4 0 1 0-4-4v2h-3Zm0 2h3v3h-3v-3Zm5-2v-2a2 2 0 1 1 2 2h-2Zm0 7h2a2 2 0 1 1-2 2v-2Zm-7 0v2a2 2 0 1 1-2-2h2Z"
+      />
+    </svg>
+  );
+};
+
+export const DocumentIcon2 = ({
+  size = 16,
+  className = defaultTailwindCSS,
+}: IconProps) => {
+  return (
+    <svg
+      style={{ width: `${size}px`, height: `${size}px` }}
+      className={`w-[${size}px] h-[${size}px] ` + className}
+      xmlns="http://www.w3.org/2000/svg"
+      width="200"
+      height="200"
+      viewBox="0 0 24 24"
+    >
+      <path
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.5"
+        d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"
+      />
+    </svg>
+  );
+};
+
+export const WindowsIcon = ({
+  size = 16,
+  className = "my-auto flex flex-shrink-0 ",
+}: IconProps) => {
+  return (
+    <svg
+      style={{ width: `${size}px`, height: `${size}px` }}
+      className={`w-[${size}px] h-[${size}px] ` + className}
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      width="24"
+      height="24"
+    >
+      <path
+        fill="currentColor"
+        d="M3 3h8v8H3V3zm10 0h8v8h-8V3zm-10 10h8v8H3v-8zm10 0h8v8h-8v-8z"
+      />
+    </svg>
+  );
+};
+
+export const OpenIcon = ({
+  size = 16,
+  className = defaultTailwindCSS,
+}: IconProps) => {
+  return (
+    <svg
+      style={{ width: `${size}px`, height: `${size}px` }}
+      className={`w-[${size}px] h-[${size}px] ` + className}
+      xmlns="http://www.w3.org/2000/svg"
+      width="200"
+      height="200"
+      viewBox="0 0 14 14"
+    >
+      <path
+        fill="none"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        d="M7 13.5a9.26 9.26 0 0 0-5.61-2.95a1 1 0 0 1-.89-1V1.5A1 1 0 0 1 1.64.51A9.3 9.3 0 0 1 7 3.43zm0 0a9.26 9.26 0 0 1 5.61-2.95a1 1 0 0 0 .89-1V1.5a1 1 0 0 0-1.14-.99A9.3 9.3 0 0 0 7 3.43z"
+      />
+    </svg>
+  );
+};
+
+export const DexpandTwoIcon = ({
+  size = 16,
+  className = defaultTailwindCSS,
+}: IconProps) => {
+  return (
+    <svg
+      style={{ width: `${size}px`, height: `${size}px` }}
+      className={`w-[${size}px] h-[${size}px] ` + className}
+      xmlns="http://www.w3.org/2000/svg"
+      width="200"
+      height="200"
+      viewBox="0 0 14 14"
+    >
+      <path
+        fill="none"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        d="m.5 13.5l5-5m-4 0h4v4m8-12l-5 5m4 0h-4v-4"
+      />
+    </svg>
+  );
+};
+
+export const ExpandTwoIcon = ({
+  size = 16,
+  className = defaultTailwindCSS,
+}: IconProps) => {
+  return (
+    <svg
+      style={{ width: `${size}px`, height: `${size}px` }}
+      className={`w-[${size}px] h-[${size}px] ` + className}
+      xmlns="http://www.w3.org/2000/svg"
+      width="200"
+      height="200"
+      viewBox="0 0 14 14"
+    >
+      <path
+        fill="none"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        d="m8.5 5.5l5-5m-4 0h4v4m-8 4l-5 5m4 0h-4v-4"
+      />
+    </svg>
+  );
+};
+
+export const DownloadCSVIcon = ({
+  size = 16,
+  className = defaultTailwindCSS,
+}: IconProps) => {
+  return (
+    <svg
+      style={{ width: `${size}px`, height: `${size}px` }}
+      className={`w-[${size}px] h-[${size}px] ` + className}
+      xmlns="http://www.w3.org/2000/svg"
+      width="200"
+      height="200"
+      viewBox="0 0 14 14"
+    >
+      <path
+        fill="none"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        d="M.5 10.5v1a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2v-1M4 6l3 3.5L10 6M7 9.5v-9"
       />
     </svg>
   );

@@ -4,9 +4,7 @@ import { GroupsIcon } from "@/components/icons/icons";
 import { UserGroupsTable } from "./UserGroupsTable";
 import { UserGroupCreationForm } from "./UserGroupCreationForm";
 import { usePopup } from "@/components/admin/connectors/Popup";
-import { useState, useEffect } from "react";
-import { getCurrentUser } from "@/lib/user";
-import { User, UserRole } from "@/lib/types";
+import { useState } from "react";
 import { ThreeDotsLoader } from "@/components/Loading";
 import {
   useConnectorCredentialIndexingStatus,
@@ -14,7 +12,10 @@ import {
   useUsers,
 } from "@/lib/hooks";
 import { AdminPageTitle } from "@/components/admin/Title";
-import { Button, Divider } from "@tremor/react";
+import { Button } from "@/components/ui/button";
+
+import { useUser } from "@/components/user/UserProvider";
+import { Separator } from "@/components/ui/separator";
 
 const Main = () => {
   const { popup, setPopup } = usePopup();
@@ -34,23 +35,10 @@ const Main = () => {
     error: usersError,
   } = useUsers();
 
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const isAdmin = currentUser?.role === UserRole.ADMIN;
-  useEffect(() => {
-    const fetchCurrentUser = async () => {
-      try {
-        const user = await getCurrentUser();
-        if (user) {
-          setCurrentUser(user);
-        } else {
-          console.error("Failed to fetch current user");
-        }
-      } catch (error) {
-        console.error("Error fetching current user:", error);
-      }
-    };
-    fetchCurrentUser();
-  }, []);
+  const { isLoadingUser, isAdmin } = useUser();
+  if (isLoadingUser) {
+    return <></>;
+  }
 
   if (isLoading || isCCPairsLoading || userIsLoading) {
     return <ThreeDotsLoader />;
@@ -73,14 +61,17 @@ const Main = () => {
       {popup}
       {isAdmin && (
         <div className="my-3">
-          <Button size="xs" color="green" onClick={() => setShowForm(true)}>
+          <Button
+            size="sm"
+            variant="navigate"
+            onClick={() => setShowForm(true)}
+          >
             Create New User Group
           </Button>
         </div>
       )}
       {data.length > 0 && (
         <div>
-          {isAdmin && <Divider />}
           <UserGroupsTable
             userGroups={data}
             setPopup={setPopup}

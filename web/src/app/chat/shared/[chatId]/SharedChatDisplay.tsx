@@ -9,12 +9,14 @@ import {
   processRawChatHistory,
 } from "../../lib";
 import { AIMessage, HumanMessage } from "../../message/Messages";
-import { Button, Callout, Divider } from "@tremor/react";
+import { Callout } from "@/components/ui/callout";
+import { Separator } from "@/components/ui/separator";
 import { useRouter } from "next/navigation";
-import { Persona } from "@/app/admin/assistants/interfaces";
 import { useContext, useEffect, useState } from "react";
 import { SettingsContext } from "@/components/settings/SettingsProvider";
 import { DanswerInitializingLoader } from "@/components/DanswerInitializingLoader";
+import { Persona } from "@/app/admin/assistants/interfaces";
+import { Button } from "@/components/ui/button";
 
 function BackToDanswerButton() {
   const router = useRouter();
@@ -27,17 +29,16 @@ function BackToDanswerButton() {
           Back to {enterpriseSettings?.application_name || "Danswer Chat"}
         </Button>
       </div>
-      pr
     </div>
   );
 }
 
 export function SharedChatDisplay({
   chatSession,
-  availableAssistants,
+  persona,
 }: {
   chatSession: BackendChatSession | null;
-  availableAssistants: Persona[];
+  persona: Persona;
 }) {
   const [isReady, setIsReady] = useState(false);
   useEffect(() => {
@@ -48,7 +49,7 @@ export function SharedChatDisplay({
     return (
       <div className="min-h-full w-full">
         <div className="mx-auto w-fit pt-8">
-          <Callout color="red" title="Shared Chat Not Found">
+          <Callout type="danger" title="Shared Chat Not Found">
             Did not find a shared chat with the specified ID.
           </Callout>
         </div>
@@ -56,9 +57,6 @@ export function SharedChatDisplay({
       </div>
     );
   }
-  const currentPersona = availableAssistants.find(
-    (persona) => persona.id === chatSession.persona_id
-  );
 
   const messages = buildLatestMessageChain(
     processRawChatHistory(chatSession.messages)
@@ -68,7 +66,7 @@ export function SharedChatDisplay({
     <div className="w-full h-[100dvh] overflow-hidden">
       <div className="flex max-h-full overflow-hidden pb-[72px]">
         <div className="flex w-full overflow-hidden overflow-y-scroll">
-          <div className="w-full h-full flex-col flex  max-w-message-max mx-auto">
+          <div className="w-full h-full flex-col flex max-w-message-max mx-auto">
             <div className="px-5 pt-8">
               <h1 className="text-3xl text-strong font-bold">
                 {chatSession.description ||
@@ -78,7 +76,7 @@ export function SharedChatDisplay({
                 {humanReadableFormat(chatSession.time_created)}
               </p>
 
-              <Divider />
+              <Separator />
             </div>
             {isReady ? (
               <div className="w-full pb-16">
@@ -96,12 +94,11 @@ export function SharedChatDisplay({
                     return (
                       <AIMessage
                         shared
-                        currentPersona={currentPersona!}
+                        currentPersona={persona}
                         key={message.messageId}
                         messageId={message.messageId}
                         content={message.message}
                         files={message.files || []}
-                        personaName={chatSession.persona_name}
                         citedDocuments={getCitedDocumentsFromMessage(message)}
                         isComplete
                       />

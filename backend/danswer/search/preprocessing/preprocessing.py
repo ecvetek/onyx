@@ -9,25 +9,28 @@ from danswer.configs.chat_configs import HYBRID_ALPHA
 from danswer.configs.chat_configs import HYBRID_ALPHA_KEYWORD
 from danswer.configs.chat_configs import NUM_POSTPROCESSED_RESULTS
 from danswer.configs.chat_configs import NUM_RETURNED_HITS
+from danswer.db.engine import CURRENT_TENANT_ID_CONTEXTVAR
 from danswer.db.models import User
+from danswer.db.search_settings import get_current_search_settings
 from danswer.llm.interfaces import LLM
 from danswer.natural_language_processing.search_nlp_models import QueryAnalysisModel
 from danswer.search.enums import LLMEvaluationType
 from danswer.search.enums import RecencyBiasSetting
+from danswer.search.enums import SearchType
 from danswer.search.models import BaseFilters
 from danswer.search.models import IndexFilters
+from danswer.search.models import RerankingDetails
 from danswer.search.models import SearchQuery
 from danswer.search.models import SearchRequest
-from danswer.search.models import SearchType
 from danswer.search.preprocessing.access_filters import build_access_filters_for_user
 from danswer.search.retrieval.search_runner import remove_stop_words_and_punctuation
-from danswer.search.search_settings import get_search_settings
 from danswer.secondary_llm_flows.source_filter import extract_source_filter
 from danswer.secondary_llm_flows.time_filter import extract_time_filter
 from danswer.utils.logger import setup_logger
 from danswer.utils.threadpool_concurrency import FunctionCall
 from danswer.utils.threadpool_concurrency import run_functions_in_parallel
 from danswer.utils.timing import log_function_time
+from shared_configs.configs import MULTI_TENANT
 
 
 logger = setup_logger()
@@ -66,6 +69,9 @@ def retrieval_preprocessing(
         ]
 
     time_filter = preset_filters.time_cutoff
+    if time_filter is None and persona:
+        time_filter = persona.search_start_date
+
     source_filter = preset_filters.source_type
 
     auto_detect_time_filter = True
@@ -78,6 +84,8 @@ def retrieval_preprocessing(
         logger.debug("Persona disables auto detect filters")
         auto_detect_time_filter = False
         auto_detect_source_filter = False
+    else:
+        logger.debug("Auto detect filters enabled")
 
     if (
         time_filter is not None
@@ -151,9 +159,10 @@ def retrieval_preprocessing(
     final_filters = IndexFilters(
         source_type=preset_filters.source_type or predicted_source_filters,
         document_set=preset_filters.document_set,
-        time_cutoff=preset_filters.time_cutoff or predicted_time_cutoff,
+        time_cutoff=time_filter or predicted_time_cutoff,
         tags=preset_filters.tags,  # Tags are never auto-extracted
         access_control_list=user_acl_filters,
+        tenant_id=CURRENT_TENANT_ID_CONTEXTVAR.get() if MULTI_TENANT else None,
     )
 
     llm_evaluation_type = LLMEvaluationType.BASIC
@@ -177,12 +186,11 @@ def retrieval_preprocessing(
     rerank_settings = search_request.rerank_settings
     # If not explicitly specified by the query, use the current settings
     if rerank_settings is None:
-        saved_search_settings = get_search_settings()
-        if not saved_search_settings:
-            rerank_settings = None
+        search_settings = get_current_search_settings(db_session)
+
         # For non-streaming flows, the rerank settings are applied at the search_request level
-        elif not saved_search_settings.disable_rerank_for_streaming:
-            rerank_settings = saved_search_settings.to_reranking_detail()
+        if not search_settings.disable_rerank_for_streaming:
+            rerank_settings = RerankingDetails.from_db_model(search_settings)
 
     # Decays at 1 / (1 + (multiplier * num years))
     if persona and persona.recency_bias == RecencyBiasSetting.NO_DECAY:

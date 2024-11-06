@@ -7,11 +7,12 @@ from datetime import timezone
 from typing import Any
 from typing import cast
 
-import requests
+import httpx
 from retry import retry
 
 from danswer.configs.app_configs import LOG_VESPA_TIMING_INFORMATION
 from danswer.document_index.interfaces import VespaChunkRequest
+from danswer.document_index.vespa.shared_utils.utils import get_vespa_http_client
 from danswer.document_index.vespa.shared_utils.vespa_request_builders import (
     build_vespa_filters,
 )
@@ -30,6 +31,7 @@ from danswer.document_index.vespa_constants import DOCUMENT_ID_ENDPOINT
 from danswer.document_index.vespa_constants import HIDDEN
 from danswer.document_index.vespa_constants import LARGE_CHUNK_REFERENCE_IDS
 from danswer.document_index.vespa_constants import MAX_ID_SEARCH_QUERY_SIZE
+from danswer.document_index.vespa_constants import MAX_OR_CONDITIONS
 from danswer.document_index.vespa_constants import METADATA
 from danswer.document_index.vespa_constants import METADATA_SUFFIX
 from danswer.document_index.vespa_constants import PRIMARY_OWNERS
@@ -191,20 +193,21 @@ def _get_chunks_via_visit_api(
 
     document_chunks: list[dict] = []
     while True:
-        response = requests.get(url, params=params)
         try:
-            response.raise_for_status()
-        except requests.HTTPError as e:
-            request_info = f"Headers: {response.request.headers}\nPayload: {params}"
-            response_info = f"Status Code: {response.status_code}\nResponse Content: {response.text}"
-            error_base = f"Error occurred getting chunk by Document ID {chunk_request.document_id}"
+            filtered_params = {k: v for k, v in params.items() if v is not None}
+            with get_vespa_http_client() as http_client:
+                response = http_client.get(url, params=filtered_params)
+                response.raise_for_status()
+        except httpx.HTTPError as e:
+            error_base = "Failed to query Vespa"
             logger.error(
                 f"{error_base}:\n"
-                f"{request_info}\n"
-                f"{response_info}\n"
-                f"Exception: {e}"
+                f"Request URL: {e.request.url}\n"
+                f"Request Headers: {e.request.headers}\n"
+                f"Request Payload: {params}\n"
+                f"Exception: {str(e)}"
             )
-            raise requests.HTTPError(error_base) from e
+            raise httpx.HTTPError(error_base) from e
 
         # Check if the response contains any documents
         response_data = response.json()
@@ -228,6 +231,7 @@ def _get_chunks_via_visit_api(
     return document_chunks
 
 
+@retry(tries=10, delay=1, backoff=2)
 def get_all_vespa_ids_for_document_id(
     document_id: str,
     index_name: str,
@@ -293,31 +297,32 @@ def query_vespa(
         else {},
     )
 
-    response = requests.post(
-        SEARCH_ENDPOINT,
-        json=params,
-    )
     try:
-        response.raise_for_status()
-    except requests.HTTPError as e:
-        request_info = f"Headers: {response.request.headers}\nPayload: {params}"
-        response_info = (
-            f"Status Code: {response.status_code}\n"
-            f"Response Content: {response.text}"
-        )
+        with get_vespa_http_client() as http_client:
+            response = http_client.post(SEARCH_ENDPOINT, json=params)
+            response.raise_for_status()
+    except httpx.HTTPError as e:
         error_base = "Failed to query Vespa"
         logger.error(
             f"{error_base}:\n"
-            f"{request_info}\n"
-            f"{response_info}\n"
-            f"Exception: {e}"
+            f"Request URL: {e.request.url}\n"
+            f"Request Headers: {e.request.headers}\n"
+            f"Request Payload: {params}\n"
+            f"Exception: {str(e)}"
         )
-        raise requests.HTTPError(error_base) from e
+        raise httpx.HTTPError(error_base) from e
 
     response_json: dict[str, Any] = response.json()
+
     if LOG_VESPA_TIMING_INFORMATION:
         logger.debug("Vespa timing info: %s", response_json.get("timing"))
     hits = response_json["root"].get("children", [])
+
+    if not hits:
+        logger.warning(
+            f"No hits found for YQL Query: {query_params.get('yql', 'No YQL Query')}"
+        )
+        logger.debug(f"Vespa Response: {response.text}")
 
     for hit in hits:
         if hit["fields"].get(CONTENT) is None:
@@ -379,7 +384,7 @@ def batch_search_api_retrieval(
     capped_requests: list[VespaChunkRequest] = []
     uncapped_requests: list[VespaChunkRequest] = []
     chunk_count = 0
-    for request in chunk_requests:
+    for req_ind, request in enumerate(chunk_requests, start=1):
         # All requests without a chunk range are uncapped
         # Uncapped requests are retrieved using the Visit API
         range = request.range
@@ -387,9 +392,10 @@ def batch_search_api_retrieval(
             uncapped_requests.append(request)
             continue
 
-        # If adding the range to the chunk count is greater than the
-        # max query size, we need to perform a retrieval to avoid hitting the limit
-        if chunk_count + range > MAX_ID_SEARCH_QUERY_SIZE:
+        if (
+            chunk_count + range > MAX_ID_SEARCH_QUERY_SIZE
+            or req_ind % MAX_OR_CONDITIONS == 0
+        ):
             retrieved_chunks.extend(
                 _get_chunks_via_batch_search(
                     index_name=index_name,

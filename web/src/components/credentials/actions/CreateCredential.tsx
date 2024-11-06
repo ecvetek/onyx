@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from "react";
-import { Button, Card } from "@tremor/react";
+import React, { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { ValidSources } from "@/lib/types";
 import { FaAccusoft } from "react-icons/fa";
 import { submitCredential } from "@/components/admin/connectors/CredentialForm";
 import { TextFormField } from "@/components/admin/connectors/Field";
-import { Form, Formik, FormikHelpers, FormikProps } from "formik";
+import { Form, Formik, FormikHelpers } from "formik";
 import { PopupSpec } from "@/components/admin/connectors/Popup";
 import { getSourceDocLink } from "@/lib/sources";
 import GDriveMain from "@/app/admin/connectors/[connector]/pages/gdrive/GoogleDrivePage";
@@ -26,6 +27,8 @@ import {
   IsPublicGroupSelectorFormType,
   IsPublicGroupSelector,
 } from "@/components/IsPublicGroupSelector";
+import { useUser } from "@/components/user/UserProvider";
+import CardSection from "@/components/admin/CardSection";
 
 const CreateButton = ({
   onClick,
@@ -92,27 +95,12 @@ export default function CreateCredential({
   refresh?: () => void;
 }) {
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
   const isPaidEnterpriseFeaturesEnabled = usePaidEnterpriseFeaturesEnabled();
 
-  useEffect(() => {
-    const fetchCurrentUser = async () => {
-      try {
-        const user = await getCurrentUser();
-        if (user) {
-          setCurrentUser(user);
-        } else {
-          console.error("Failed to fetch current user");
-        }
-      } catch (error) {
-        console.error("Error fetching current user:", error);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    fetchCurrentUser();
-  }, []);
+  const { isLoadingUser, isAdmin } = useUser();
+  if (isLoadingUser) {
+    return <></>;
+  }
 
   const handleSubmit = async (
     values: formType,
@@ -184,7 +172,6 @@ export default function CreateCredential({
     return <GDriveMain />;
   }
 
-  const isAdmin = currentUser?.role === UserRole.ADMIN;
   const credentialTemplate: dictionaryType = credentialTemplates[sourceType];
   const validationSchema = createValidationSchema(credentialTemplate);
 
@@ -193,7 +180,7 @@ export default function CreateCredential({
       initialValues={
         {
           name: "",
-          is_public: isAdmin,
+          is_public: isAdmin || !isPaidEnterpriseFeaturesEnabled,
           groups: [],
         } as formType
       }
@@ -201,7 +188,7 @@ export default function CreateCredential({
       onSubmit={() => {}} // This will be overridden by our custom submit handlers
     >
       {(formikProps) => (
-        <Form>
+        <Form className="w-full flex items-stretch">
           {!hideSource && (
             <p className="text-sm">
               Check our
@@ -216,7 +203,7 @@ export default function CreateCredential({
               for information on setting up this connector.
             </p>
           )}
-          <Card className="!border-0 mt-4">
+          <CardSection className="!border-0 mt-4 flex flex-col gap-y-6">
             <TextFormField
               name="name"
               placeholder="(Optional) credential name.."
@@ -236,7 +223,7 @@ export default function CreateCredential({
                 }
               />
             ))}
-            {!swapConnector && !isLoading && (
+            {!swapConnector && (
               <div className="mt-4 flex flex-col sm:flex-row justify-between items-end">
                 <div className="w-full sm:w-3/4 mb-4 sm:mb-0">
                   {isPaidEnterpriseFeaturesEnabled && (
@@ -251,6 +238,7 @@ export default function CreateCredential({
                         <IsPublicGroupSelector
                           formikProps={formikProps}
                           objectName="credential"
+                          publicToWhom="Curators"
                         />
                       )}
                     </div>
@@ -268,7 +256,7 @@ export default function CreateCredential({
                 </div>
               </div>
             )}
-          </Card>
+          </CardSection>
           {swapConnector && (
             <div className="flex gap-x-4 w-full mt-8 justify-end">
               <Button

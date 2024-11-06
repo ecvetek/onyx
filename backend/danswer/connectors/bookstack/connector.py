@@ -47,8 +47,6 @@ class BookstackConnector(LoadConnector, PollConnector):
         start: SecondsSinceUnixEpoch | None = None,
         end: SecondsSinceUnixEpoch | None = None,
     ) -> tuple[list[Document], int]:
-        doc_batch: list[Document] = []
-
         params = {
             "count": str(batch_size),
             "offset": str(start_ind),
@@ -66,8 +64,7 @@ class BookstackConnector(LoadConnector, PollConnector):
             )
 
         batch = bookstack_client.get(endpoint, params=params).get("data", [])
-        for item in batch:
-            doc_batch.append(transformer(bookstack_client, item))
+        doc_batch = [transformer(bookstack_client, item) for item in batch]
 
         return doc_batch, len(batch)
 

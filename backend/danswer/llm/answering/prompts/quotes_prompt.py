@@ -3,7 +3,9 @@ from langchain.schema.messages import HumanMessage
 from danswer.chat.models import LlmDoc
 from danswer.configs.chat_configs import LANGUAGE_HINT
 from danswer.configs.chat_configs import QA_PROMPT_OVERRIDE
+from danswer.db.search_settings import get_multilingual_expansion
 from danswer.llm.answering.models import PromptConfig
+from danswer.llm.utils import message_to_prompt_and_imgs
 from danswer.prompts.direct_qa_prompts import CONTEXT_BLOCK
 from danswer.prompts.direct_qa_prompts import HISTORY_BLOCK
 from danswer.prompts.direct_qa_prompts import JSON_PROMPT
@@ -11,7 +13,6 @@ from danswer.prompts.direct_qa_prompts import WEAK_LLM_PROMPT
 from danswer.prompts.prompt_utils import add_date_time_to_prompt
 from danswer.prompts.prompt_utils import build_complete_context_str
 from danswer.search.models import InferenceChunk
-from danswer.search.search_settings import get_search_settings
 
 
 def _build_weak_llm_quotes_prompt(
@@ -48,10 +49,7 @@ def _build_strong_llm_quotes_prompt(
     history_str: str,
     prompt: PromptConfig,
 ) -> HumanMessage:
-    search_settings = get_search_settings()
-    use_language_hint = (
-        bool(search_settings.multilingual_expansion) if search_settings else False
-    )
+    use_language_hint = bool(get_multilingual_expansion())
 
     context_block = ""
     if context_docs:
@@ -78,7 +76,7 @@ def _build_strong_llm_quotes_prompt(
 
 
 def build_quotes_user_message(
-    question: str,
+    message: HumanMessage,
     context_docs: list[LlmDoc] | list[InferenceChunk],
     history_str: str,
     prompt: PromptConfig,
@@ -89,28 +87,10 @@ def build_quotes_user_message(
         else _build_strong_llm_quotes_prompt
     )
 
-    return prompt_builder(
-        question=question,
-        context_docs=context_docs,
-        history_str=history_str,
-        prompt=prompt,
-    )
-
-
-def build_quotes_prompt(
-    question: str,
-    context_docs: list[LlmDoc] | list[InferenceChunk],
-    history_str: str,
-    prompt: PromptConfig,
-) -> HumanMessage:
-    prompt_builder = (
-        _build_weak_llm_quotes_prompt
-        if QA_PROMPT_OVERRIDE == "weak"
-        else _build_strong_llm_quotes_prompt
-    )
+    query, _ = message_to_prompt_and_imgs(message)
 
     return prompt_builder(
-        question=question,
+        question=query,
         context_docs=context_docs,
         history_str=history_str,
         prompt=prompt,

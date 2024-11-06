@@ -4,7 +4,12 @@ import {
 } from "@/components/BasicClickable";
 import { HoverPopup } from "@/components/HoverPopup";
 import { Hoverable } from "@/components/Hoverable";
-import { Tooltip } from "@/components/tooltip/Tooltip";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useEffect, useRef, useState } from "react";
 import { FiCheck, FiEdit2, FiSearch, FiX } from "react-icons/fi";
 
@@ -40,7 +45,6 @@ export function SearchSummary({
   hasDocs,
   finished,
   messageId,
-  isCurrentlyShowingRetrieved,
   handleShowRetrieved,
   handleSearchQueryEdit,
 }: {
@@ -48,7 +52,6 @@ export function SearchSummary({
   query: string;
   hasDocs: boolean;
   messageId: number | null;
-  isCurrentlyShowingRetrieved: boolean;
   handleShowRetrieved: (messageId: number | null) => void;
   handleSearchQueryEdit?: (query: string) => void;
 }) {
@@ -85,7 +88,7 @@ export function SearchSummary({
     if (!isEditing) {
       setFinalQuery(query);
     }
-  }, [query]);
+  }, [query, isEditing]);
 
   const searchingForDisplay = (
     <div className={`flex p-1 rounded ${isOverflowed && "cursor-default"}`}>
@@ -171,16 +174,21 @@ export function SearchSummary({
             )}
           </div>
           {handleSearchQueryEdit && (
-            <Tooltip delayDuration={1000} content={"Edit Search"}>
-              <button
-                className="my-auto hover:bg-hover p-1.5 rounded"
-                onClick={() => {
-                  setIsEditing(true);
-                }}
-              >
-                <FiEdit2 />
-              </button>
-            </Tooltip>
+            <TooltipProvider delayDuration={1000}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    className="my-auto hover:bg-hover p-1.5 rounded"
+                    onClick={() => {
+                      setIsEditing(true);
+                    }}
+                  >
+                    <FiEdit2 />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>Edit Search</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           )}
         </>
       )}

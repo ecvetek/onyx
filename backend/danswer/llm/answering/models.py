@@ -1,6 +1,5 @@
 from collections.abc import Callable
 from collections.abc import Iterator
-from typing import Any
 from typing import TYPE_CHECKING
 
 from langchain.schema.messages import AIMessage
@@ -8,8 +7,9 @@ from langchain.schema.messages import BaseMessage
 from langchain.schema.messages import HumanMessage
 from langchain.schema.messages import SystemMessage
 from pydantic import BaseModel
+from pydantic import ConfigDict
 from pydantic import Field
-from pydantic import root_validator
+from pydantic import model_validator
 
 from danswer.chat.models import AnswerQuestionStreamReturn
 from danswer.configs.constants import MessageType
@@ -33,7 +33,7 @@ class PreviousMessage(BaseModel):
     token_count: int
     message_type: MessageType
     files: list[InMemoryChatFile]
-    tool_calls: list[ToolCallFinalResult]
+    tool_call: ToolCallFinalResult | None
 
     @classmethod
     def from_chat_message(
@@ -51,14 +51,13 @@ class PreviousMessage(BaseModel):
                 for file in available_files
                 if str(file.file_id) in message_file_ids
             ],
-            tool_calls=[
-                ToolCallFinalResult(
-                    tool_name=tool_call.tool_name,
-                    tool_args=tool_call.tool_arguments,
-                    tool_result=tool_call.tool_result,
-                )
-                for tool_call in chat_message.tool_calls
-            ],
+            tool_call=ToolCallFinalResult(
+                tool_name=chat_message.tool_call.tool_name,
+                tool_args=chat_message.tool_call.tool_arguments,
+                tool_result=chat_message.tool_call.tool_result,
+            )
+            if chat_message.tool_call
+            else None,
         )
 
     def to_langchain_msg(self) -> BaseMessage:
@@ -116,23 +115,24 @@ class AnswerStyleConfig(BaseModel):
     document_pruning_config: DocumentPruningConfig = Field(
         default_factory=DocumentPruningConfig
     )
+    # forces the LLM to return a structured response, see
+    # https://platform.openai.com/docs/guides/structured-outputs/introduction
+    # right now, only used by the simple chat API
+    structured_response_format: dict | None = None
 
-    @root_validator
-    def check_quotes_and_citation(cls, values: dict[str, Any]) -> dict[str, Any]:
-        citation_config = values.get("citation_config")
-        quotes_config = values.get("quotes_config")
-
-        if citation_config is None and quotes_config is None:
+    @model_validator(mode="after")
+    def check_quotes_and_citation(self) -> "AnswerStyleConfig":
+        if self.citation_config is None and self.quotes_config is None:
             raise ValueError(
                 "One of `citation_config` or `quotes_config` must be provided"
             )
 
-        if citation_config is not None and quotes_config is not None:
+        if self.citation_config is not None and self.quotes_config is not None:
             raise ValueError(
                 "Only one of `citation_config` or `quotes_config` must be provided"
             )
 
-        return values
+        return self
 
 
 class PromptConfig(BaseModel):
@@ -160,6 +160,4 @@ class PromptConfig(BaseModel):
             include_citations=model.include_citations,
         )
 
-    # needed so that this can be passed into lru_cache funcs
-    class Config:
-        frozen = True
+    model_config = ConfigDict(frozen=True)

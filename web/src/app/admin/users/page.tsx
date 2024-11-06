@@ -6,13 +6,13 @@ import { useState } from "react";
 import { FiPlusSquare } from "react-icons/fi";
 import { Modal } from "@/components/Modal";
 
-import { Button, Text } from "@tremor/react";
+import { Button } from "@/components/ui/button";
+import Text from "@/components/ui/text";
 import { LoadingAnimation } from "@/components/Loading";
 import { AdminPageTitle } from "@/components/admin/Title";
 import { usePopup, PopupSpec } from "@/components/admin/connectors/Popup";
 import { UsersIcon } from "@/components/icons/icons";
 import { errorHandlingFetcher } from "@/lib/fetcher";
-import { type User, UserStatus } from "@/lib/types";
 import useSWR, { mutate } from "swr";
 import { ErrorCallout } from "@/components/ErrorCallout";
 import { HidableSection } from "@/app/admin/assistants/HidableSection";
@@ -194,6 +194,7 @@ const AddUserButton = ({
           Invite Users
         </div>
       </Button>
+
       {modal && (
         <Modal title="Bulk Add Users" onOutsideClick={() => setModal(false)}>
           <div className="flex flex-col gap-y-4">
