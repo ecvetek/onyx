@@ -9,7 +9,7 @@ import { checkUserIsNoAuthUser, logout } from "@/lib/user";
 import { Popover } from "./popover/Popover";
 import { LOGOUT_DISABLED } from "@/lib/constants";
 import { SettingsContext } from "./settings/SettingsProvider";
-import { BellIcon, LightSettingsIcon } from "./icons/icons";
+import { BellIcon, LightSettingsIcon, UserIcon } from "./icons/icons";
 import { pageType } from "@/app/chat/sessionSidebar/types";
 import { NavigationItem, Notification } from "@/app/admin/settings/interfaces";
 import DynamicFaIcon, { preloadIcons } from "./icons/DynamicFaIcon";
@@ -35,7 +35,7 @@ const DropdownOption: React.FC<DropdownOptionProps> = ({
   openInNewTab,
 }) => {
   const content = (
-    <div className="flex py-3 px-4 cursor-pointer rounded hover:bg-hover-light">
+    <div className="flex py-3 px-4 cursor-pointer rounded hover:bg-hover">
       {icon}
       {label}
     </div>
@@ -56,7 +56,15 @@ const DropdownOption: React.FC<DropdownOptionProps> = ({
   }
 };
 
-export function UserDropdown({ page }: { page?: pageType }) {
+export function UserDropdown({
+  page,
+  toggleUserSettings,
+  hideUserDropdown,
+}: {
+  page?: pageType;
+  toggleUserSettings?: () => void;
+  hideUserDropdown?: boolean;
+}) {
   const { user, isCurator } = useUser();
   const [userInfoVisible, setUserInfoVisible] = useState(false);
   const userInfoRef = useRef<HTMLDivElement>(null);
@@ -108,6 +116,7 @@ export function UserDropdown({ page }: { page?: pageType }) {
   };
 
   const showAdminPanel = !user || user.role === UserRole.ADMIN;
+
   const showCuratorPanel = user && isCurator;
   const showLogout =
     user && !checkUserIsNoAuthUser(user.id) && !LOGOUT_DISABLED;
@@ -130,7 +139,7 @@ export function UserDropdown({ page }: { page?: pageType }) {
             <div
               className="
                 my-auto
-                bg-background-strong
+                bg-userdropdown-background
                 ring-2
                 ring-transparent
                 group-hover:ring-background-300/50
@@ -176,6 +185,12 @@ export function UserDropdown({ page }: { page?: pageType }) {
                 navigateToDropdown={() => setShowNotifications(false)}
                 notifications={notifications || []}
                 refreshNotifications={refreshNotifications}
+              />
+            ) : hideUserDropdown ? (
+              <DropdownOption
+                onClick={() => router.push("/auth/login")}
+                icon={<UserIcon className="h-5 w-5 my-auto mr-2" />}
+                label="Log In"
               />
             ) : (
               <>
@@ -236,6 +251,14 @@ export function UserDropdown({ page }: { page?: pageType }) {
                       label="Curator Panel"
                     />
                   )
+                )}
+
+                {toggleUserSettings && (
+                  <DropdownOption
+                    onClick={toggleUserSettings}
+                    icon={<UserIcon className="h-5 w-5 my-auto mr-2" />}
+                    label="User Settings"
+                  />
                 )}
 
                 <DropdownOption

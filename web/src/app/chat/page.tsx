@@ -31,7 +31,7 @@ export default async function Page(props: {
     openedFolders,
     defaultAssistantId,
     shouldShowWelcomeModal,
-    userInputPrompts,
+    ccPairs,
   } = data;
 
   return (
@@ -44,17 +44,21 @@ export default async function Page(props: {
         value={{
           chatSessions,
           availableSources,
+          ccPairs,
+          documentSets,
+          tags,
           availableDocumentSets: documentSets,
           availableTags: tags,
           llmProviders,
           folders,
           openedFolders,
-          userInputPrompts,
           shouldShowWelcomeModal,
           defaultAssistantId,
         }}
       >
-        <WrappedChat initiallyToggled={toggleSidebar} />
+        <WrappedChat
+          initiallyToggled={toggleSidebar && !user?.is_anonymous_user}
+        />
       </ChatProvider>
     </>
   );

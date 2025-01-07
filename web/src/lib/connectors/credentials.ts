@@ -1,5 +1,16 @@
 import { ValidSources } from "../types";
 
+export interface OAuthAdditionalKwargDescription {
+  name: string;
+  display_name: string;
+  description: string;
+}
+
+export interface OAuthDetails {
+  oauth_enabled: boolean;
+  additional_kwargs: OAuthAdditionalKwargDescription[];
+}
+
 export interface CredentialBase<T> {
   credential_json: T;
   admin_public: boolean;
@@ -60,6 +71,7 @@ export interface GmailCredentialJson {
 export interface GoogleDriveCredentialJson {
   google_tokens: string;
   google_primary_admin: string;
+  authentication_method?: string;
 }
 
 export interface GmailServiceAccountCredentialJson {
@@ -70,6 +82,7 @@ export interface GmailServiceAccountCredentialJson {
 export interface GoogleDriveServiceAccountCredentialJson {
   google_service_account_key: string;
   google_primary_admin: string;
+  authentication_method?: string;
 }
 
 export interface SlabCredentialJson {
@@ -182,6 +195,10 @@ export interface AxeroCredentialJson {
   axero_api_token: string;
 }
 
+export interface DiscordCredentialJson {
+  discord_bot_token: string;
+}
+
 export interface FreshdeskCredentialJson {
   freshdesk_domain: string;
   freshdesk_password: string;
@@ -194,6 +211,15 @@ export interface FirefliesCredentialJson {
 
 export interface MediaWikiCredentialJson {}
 export interface WikipediaCredentialJson extends MediaWikiCredentialJson {}
+
+export interface EgnyteCredentialJson {
+  domain: string;
+  access_token: string;
+}
+
+export interface AirtableCredentialJson {
+  airtable_access_token: string;
+}
 
 export const credentialTemplates: Record<ValidSources, any> = {
   github: { github_access_token: "" } as GithubCredentialJson,
@@ -298,6 +324,13 @@ export const credentialTemplates: Record<ValidSources, any> = {
   fireflies: {
     fireflies_api_key: "",
   } as FirefliesCredentialJson,
+  egnyte: {
+    domain: "",
+    access_token: "",
+  } as EgnyteCredentialJson,
+  airtable: {
+    airtable_access_token: "",
+  } as AirtableCredentialJson,
   xenforo: null,
   google_sites: null,
   file: null,
@@ -306,6 +339,7 @@ export const credentialTemplates: Record<ValidSources, any> = {
   web: null,
   not_applicable: null,
   ingestion_api: null,
+  discord: { discord_bot_token: "" } as DiscordCredentialJson,
 
   // NOTE: These are Special Cases
   google_drive: { google_tokens: "" } as GoogleDriveCredentialJson,
@@ -338,6 +372,9 @@ export const credentialDisplayNames: Record<string, string> = {
 
   // Slack
   slack_bot_token: "Slack Bot Token",
+
+  // Discord
+  discord_bot_token: "Discord Bot Token",
 
   // Gmail and Google Drive
   google_tokens: "Google Oauth Tokens",
