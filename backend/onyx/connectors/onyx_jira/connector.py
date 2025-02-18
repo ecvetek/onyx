@@ -29,6 +29,7 @@ from onyx.connectors.onyx_jira.utils import build_jira_url
 from onyx.connectors.onyx_jira.utils import extract_jira_project
 from onyx.connectors.onyx_jira.utils import extract_text_from_adf
 from onyx.connectors.onyx_jira.utils import get_comment_strs
+from onyx.indexing.indexing_heartbeat import IndexingHeartbeatInterface
 from onyx.utils.logger import setup_logger
 
 
@@ -144,7 +145,8 @@ def fetch_jira_issues_batch(
             id=page_url,
             sections=[Section(link=page_url, text=ticket_content)],
             source=DocumentSource.JIRA,
-            semantic_identifier=issue.fields.summary,
+            semantic_identifier=f"{issue.key}: {issue.fields.summary}",
+            title=f"{issue.key} {issue.fields.summary}",
             doc_updated_at=time_str_to_utc(issue.fields.updated),
             primary_owners=list(people) or None,
             # TODO add secondary_owners (commenters) if needed
@@ -245,6 +247,7 @@ class JiraConnector(LoadConnector, PollConnector, SlimConnector):
         self,
         start: SecondsSinceUnixEpoch | None = None,
         end: SecondsSinceUnixEpoch | None = None,
+        callback: IndexingHeartbeatInterface | None = None,
     ) -> GenerateSlimDocumentOutput:
         jql = f"project = {self.quoted_jira_project}"
 

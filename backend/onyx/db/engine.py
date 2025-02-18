@@ -18,6 +18,7 @@ import boto3
 from fastapi import HTTPException
 from fastapi import Request
 from sqlalchemy import event
+from sqlalchemy import pool
 from sqlalchemy import text
 from sqlalchemy.engine import create_engine
 from sqlalchemy.engine import Engine
@@ -39,6 +40,7 @@ from onyx.configs.app_configs import POSTGRES_PASSWORD
 from onyx.configs.app_configs import POSTGRES_POOL_PRE_PING
 from onyx.configs.app_configs import POSTGRES_POOL_RECYCLE
 from onyx.configs.app_configs import POSTGRES_PORT
+from onyx.configs.app_configs import POSTGRES_USE_NULL_POOL
 from onyx.configs.app_configs import POSTGRES_USER
 from onyx.configs.constants import POSTGRES_UNKNOWN_APP_NAME
 from onyx.configs.constants import SSL_CERT_FILE
@@ -187,20 +189,38 @@ class SqlEngine:
     _engine: Engine | None = None
     _lock: threading.Lock = threading.Lock()
     _app_name: str = POSTGRES_UNKNOWN_APP_NAME
-    DEFAULT_ENGINE_KWARGS = {
-        "pool_size": 20,
-        "max_overflow": 5,
-        "pool_pre_ping": POSTGRES_POOL_PRE_PING,
-        "pool_recycle": POSTGRES_POOL_RECYCLE,
-    }
 
     @classmethod
     def _init_engine(cls, **engine_kwargs: Any) -> Engine:
         connection_string = build_connection_string(
             db_api=SYNC_DB_API, app_name=cls._app_name + "_sync", use_iam=USE_IAM_AUTH
         )
-        merged_kwargs = {**cls.DEFAULT_ENGINE_KWARGS, **engine_kwargs}
-        engine = create_engine(connection_string, **merged_kwargs)
+
+        # Start with base kwargs that are valid for all pool types
+        final_engine_kwargs: dict[str, Any] = {}
+
+        if POSTGRES_USE_NULL_POOL:
+            # if null pool is specified, then we need to make sure that
+            # we remove any passed in kwargs related to pool size that would
+            # cause the initialization to fail
+            final_engine_kwargs.update(engine_kwargs)
+
+            final_engine_kwargs["poolclass"] = pool.NullPool
+            if "pool_size" in final_engine_kwargs:
+                del final_engine_kwargs["pool_size"]
+            if "max_overflow" in final_engine_kwargs:
+                del final_engine_kwargs["max_overflow"]
+        else:
+            final_engine_kwargs["pool_size"] = 20
+            final_engine_kwargs["max_overflow"] = 5
+            final_engine_kwargs["pool_pre_ping"] = POSTGRES_POOL_PRE_PING
+            final_engine_kwargs["pool_recycle"] = POSTGRES_POOL_RECYCLE
+
+            # any passed in kwargs override the defaults
+            final_engine_kwargs.update(engine_kwargs)
+
+        logger.info(f"Creating engine with kwargs: {final_engine_kwargs}")
+        engine = create_engine(connection_string, **final_engine_kwargs)
 
         if USE_IAM_AUTH:
             event.listen(engine, "do_connect", provide_iam_token)
@@ -240,8 +260,11 @@ class SqlEngine:
 
 
 def get_all_tenant_ids() -> list[str] | list[None]:
+    """Returning [None] means the only tenant is the 'public' or self hosted tenant."""
+
     if not MULTI_TENANT:
         return [None]
+
     with get_session_with_tenant(tenant_id=POSTGRES_DEFAULT_SCHEMA) as session:
         result = session.execute(
             text(
@@ -296,13 +319,21 @@ def get_sqlalchemy_async_engine() -> AsyncEngine:
 
         connect_args["ssl"] = ssl_context
 
+        engine_kwargs = {
+            "connect_args": connect_args,
+            "pool_pre_ping": POSTGRES_POOL_PRE_PING,
+            "pool_recycle": POSTGRES_POOL_RECYCLE,
+        }
+
+        if POSTGRES_USE_NULL_POOL:
+            engine_kwargs["poolclass"] = pool.NullPool
+        else:
+            engine_kwargs["pool_size"] = POSTGRES_API_SERVER_POOL_SIZE
+            engine_kwargs["max_overflow"] = POSTGRES_API_SERVER_POOL_OVERFLOW
+
         _ASYNC_ENGINE = create_async_engine(
             connection_string,
-            connect_args=connect_args,
-            pool_size=POSTGRES_API_SERVER_POOL_SIZE,
-            max_overflow=POSTGRES_API_SERVER_POOL_OVERFLOW,
-            pool_pre_ping=POSTGRES_POOL_PRE_PING,
-            pool_recycle=POSTGRES_POOL_RECYCLE,
+            **engine_kwargs,
         )
 
         if USE_IAM_AUTH:
@@ -354,6 +385,26 @@ async def get_current_tenant_id(request: Request) -> str:
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+# Listen for events on the synchronous Session class
+@event.listens_for(Session, "after_begin")
+def _set_search_path(
+    session: Session, transaction: Any, connection: Any, *args: Any, **kwargs: Any
+) -> None:
+    """Every time a new transaction is started,
+    set the search_path from the session's info."""
+    tenant_id = session.info.get("tenant_id")
+    if tenant_id:
+        connection.exec_driver_sql(f'SET search_path = "{tenant_id}"')
+
+
+engine = get_sqlalchemy_async_engine()
+AsyncSessionLocal = sessionmaker(  # type: ignore
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+
 @asynccontextmanager
 async def get_async_session_with_tenant(
     tenant_id: str | None = None,
@@ -363,41 +414,22 @@ async def get_async_session_with_tenant(
 
     if not is_valid_schema_name(tenant_id):
         logger.error(f"Invalid tenant ID: {tenant_id}")
-        raise Exception("Invalid tenant ID")
+        raise ValueError("Invalid tenant ID")
 
-    engine = get_sqlalchemy_async_engine()
-    async_session_factory = sessionmaker(
-        bind=engine, expire_on_commit=False, class_=AsyncSession
-    )  # type: ignore
+    async with AsyncSessionLocal() as session:
+        session.sync_session.info["tenant_id"] = tenant_id
 
-    async def _set_search_path(session: AsyncSession, tenant_id: str) -> None:
-        await session.execute(text(f'SET search_path = "{tenant_id}"'))
-
-    async with async_session_factory() as session:
-        # Register an event listener that is called whenever a new transaction starts
-        @event.listens_for(session.sync_session, "after_begin")
-        def after_begin(session_: Any, transaction: Any, connection: Any) -> None:
-            # Because the event is sync, we can't directly await here.
-            # Instead we queue up an asyncio task to ensures
-            # the next statement sets the search_path
-            session_.do_orm_execute = lambda state: connection.exec_driver_sql(
-                f'SET search_path = "{tenant_id}"'
+        if POSTGRES_IDLE_SESSIONS_TIMEOUT:
+            await session.execute(
+                text(
+                    f"SET idle_in_transaction_session_timeout = {POSTGRES_IDLE_SESSIONS_TIMEOUT}"
+                )
             )
 
         try:
-            await _set_search_path(session, tenant_id)
-
-            if POSTGRES_IDLE_SESSIONS_TIMEOUT:
-                await session.execute(
-                    text(
-                        f"SET SESSION idle_in_transaction_session_timeout = {POSTGRES_IDLE_SESSIONS_TIMEOUT}"
-                    )
-                )
-        except Exception:
-            logger.exception("Error setting search_path.")
-            raise
-        else:
             yield session
+        finally:
+            pass
 
 
 @contextmanager

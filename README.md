@@ -119,12 +119,12 @@ There are two editions of Onyx:
   - Whitelabeling
   - API key authentication
   - Encryption of secrets
-  - Any many more! Checkout [our website](https://www.onyx.app/) for the latest.
+  - And many more! Checkout [our website](https://www.onyx.app/) for the latest.
 
 To try the Onyx Enterprise Edition:
 
 1. Checkout our [Cloud product](https://cloud.onyx.app/signup).
-2. For self-hosting, contact us at [founders@onyx.app](mailto:founders@onyx.app) or book a call with us on our [Cal](https://cal.com/team/danswer/founders).
+2. For self-hosting, contact us at [founders@onyx.app](mailto:founders@onyx.app) or book a call with us on our [Cal](https://cal.com/team/onyx/founders).
 
 ## 💡 Contributing
 
@@ -133,3 +133,4 @@ Looking to contribute? Please check out the [Contribution Guide](CONTRIBUTING.md
 ## ⭐Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=onyx-dot-app/onyx&type=Date)](https://star-history.com/#onyx-dot-app/onyx&Date)
+

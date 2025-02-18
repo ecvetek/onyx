@@ -12,6 +12,13 @@ interface UserContextType {
   refreshUser: () => Promise<void>;
   isCloudSuperuser: boolean;
   updateUserAutoScroll: (autoScroll: boolean | null) => Promise<void>;
+  updateUserShortcuts: (enabled: boolean) => Promise<void>;
+  toggleAssistantPinnedStatus: (
+    currentPinnedAssistantIDs: number[],
+    assistantId: number,
+    isPinned: boolean
+  ) => Promise<boolean>;
+  updateUserTemperatureOverrideEnabled: (enabled: boolean) => Promise<void>;
 }
 
 const UserContext = createContext<UserContextType | undefined>(undefined);
@@ -51,6 +58,76 @@ export function UserProvider({
       console.error("Error fetching current user:", error);
     }
   };
+  const updateUserTemperatureOverrideEnabled = async (enabled: boolean) => {
+    try {
+      setUpToDateUser((prevUser) => {
+        if (prevUser) {
+          return {
+            ...prevUser,
+            preferences: {
+              ...prevUser.preferences,
+              temperature_override_enabled: enabled,
+            },
+          };
+        }
+        return prevUser;
+      });
+
+      const response = await fetch(
+        `/api/temperature-override-enabled?temperature_override_enabled=${enabled}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      if (!response.ok) {
+        await refreshUser();
+        throw new Error("Failed to update user temperature override setting");
+      }
+    } catch (error) {
+      console.error("Error updating user temperature override setting:", error);
+      throw error;
+    }
+  };
+
+  const updateUserShortcuts = async (enabled: boolean) => {
+    try {
+      setUpToDateUser((prevUser) => {
+        if (prevUser) {
+          return {
+            ...prevUser,
+            preferences: {
+              ...prevUser.preferences,
+              shortcut_enabled: enabled,
+            },
+          };
+        }
+        return prevUser;
+      });
+
+      const response = await fetch(
+        `/api/shortcut-enabled?shortcut_enabled=${enabled}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      if (!response.ok) {
+        await refreshUser();
+        throw new Error("Failed to update user shortcut setting");
+      }
+    } catch (error) {
+      console.error("Error updating user shortcut setting:", error);
+      throw error;
+    }
+  };
+
   const updateUserAutoScroll = async (autoScroll: boolean | null) => {
     try {
       const response = await fetch("/api/auto-scroll", {
@@ -82,6 +159,56 @@ export function UserProvider({
     }
   };
 
+  const toggleAssistantPinnedStatus = async (
+    currentPinnedAssistantIDs: number[],
+    assistantId: number,
+    isPinned: boolean
+  ) => {
+    setUpToDateUser((prevUser) => {
+      if (!prevUser) return prevUser;
+      return {
+        ...prevUser,
+        preferences: {
+          ...prevUser.preferences,
+          pinned_assistants: isPinned
+            ? [...currentPinnedAssistantIDs, assistantId]
+            : currentPinnedAssistantIDs.filter((id) => id !== assistantId),
+        },
+      };
+    });
+
+    let updatedPinnedAssistantsIds = currentPinnedAssistantIDs;
+
+    if (isPinned) {
+      updatedPinnedAssistantsIds.push(assistantId);
+    } else {
+      updatedPinnedAssistantsIds = updatedPinnedAssistantsIds.filter(
+        (id) => id !== assistantId
+      );
+    }
+    try {
+      const response = await fetch(`/api/user/pinned-assistants`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          ordered_assistant_ids: updatedPinnedAssistantsIds,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to update pinned assistants");
+      }
+
+      await refreshUser();
+      return true;
+    } catch (error) {
+      console.error("Error updating pinned assistants:", error);
+      return false;
+    }
+  };
+
   const refreshUser = async () => {
     await fetchUser();
   };
@@ -92,6 +219,9 @@ export function UserProvider({
         user: upToDateUser,
         refreshUser,
         updateUserAutoScroll,
+        updateUserShortcuts,
+        updateUserTemperatureOverrideEnabled,
+        toggleAssistantPinnedStatus,
         isAdmin: upToDateUser?.role === UserRole.ADMIN,
         // Curator status applies for either global or basic curator
         isCurator:

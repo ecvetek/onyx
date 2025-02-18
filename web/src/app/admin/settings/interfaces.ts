@@ -1,7 +1,7 @@
-export enum GatingType {
-  FULL = "full",
-  PARTIAL = "partial",
-  NONE = "none",
+export enum ApplicationStatus {
+  PAYMENT_REMINDER = "payment_reminder",
+  GATED_ACCESS = "gated_access",
+  ACTIVE = "active",
 }
 
 export interface Settings {
@@ -10,7 +10,8 @@ export interface Settings {
   notifications: Notification[];
   needs_reindexing: boolean;
   gpu_enabled: boolean;
-  product_gating: GatingType;
+  pro_search_disabled: boolean | null;
+  application_status: ApplicationStatus;
   auto_scroll: boolean;
 }
 
@@ -62,4 +63,5 @@ export interface CombinedSettings {
   customAnalyticsScript: string | null;
   isMobile?: boolean;
   webVersion: string | null;
+  webDomain: string | null;
 }
