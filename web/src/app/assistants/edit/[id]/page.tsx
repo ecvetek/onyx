@@ -1,9 +1,7 @@
 import { ErrorCallout } from "@/components/ErrorCallout";
 import CardSection from "@/components/admin/CardSection";
 import { AssistantEditor } from "@/app/admin/assistants/AssistantEditor";
-import { SuccessfulPersonaUpdateRedirectType } from "@/app/admin/assistants/enums";
 import { fetchAssistantEditorInfoSS } from "@/lib/assistants/fetchPersonaEditorInfoSS";
-import { BackButton } from "@/components/BackButton";
 
 export default async function Page(props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
@@ -21,11 +19,7 @@ export default async function Page(props: { params: Promise<{ id: string }> }) {
         <div className="px-32">
           <div className="mx-auto container">
             <CardSection className="!border-none !bg-transparent !ring-none">
-              <AssistantEditor
-                {...values}
-                defaultPublic={false}
-                redirectType={SuccessfulPersonaUpdateRedirectType.CHAT}
-              />
+              <AssistantEditor {...values} defaultPublic={false} />
             </CardSection>
           </div>
         </div>

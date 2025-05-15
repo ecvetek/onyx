@@ -16,14 +16,15 @@ import ReactMarkdown from "react-markdown";
 import { MemoizedAnchor } from "./MemoizedTextComponents";
 import { MemoizedParagraph } from "./MemoizedTextComponents";
 import { extractCodeText, preprocessLaTeX } from "./codeUtils";
-
+import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import remarkGfm from "remark-gfm";
 import { CodeBlock } from "./CodeBlock";
 import { CheckIcon, ChevronDown } from "lucide-react";
 import { PHASE_MIN_MS, useStreamingMessages } from "./StreamingMessages";
 import { CirclingArrowIcon } from "@/components/icons/icons";
+import { handleCopy } from "./copyingUtils";
+import { transformLinkUri } from "@/lib/utils";
 
 export const StatusIndicator = ({ status }: { status: ToggleState }) => {
   return (
@@ -175,6 +176,7 @@ const SubQuestionDisplay: React.FC<{
       <MemoizedAnchor
         updatePresentingDocument={setPresentingDocument!}
         docs={subQuestion?.context_docs?.top_documents || documents}
+        href={props.href}
       >
         {props.children}
       </MemoizedAnchor>
@@ -291,6 +293,7 @@ const SubQuestionDisplay: React.FC<{
     }
   }, [currentlyClosed]);
 
+  const analysisRef = useRef<HTMLDivElement>(null);
   const renderedMarkdown = useMemo(() => {
     return (
       <ReactMarkdown
@@ -298,6 +301,7 @@ const SubQuestionDisplay: React.FC<{
         components={markdownComponents}
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
+        urlTransform={transformLinkUri}
       >
         {finalContent}
       </ReactMarkdown>
@@ -427,7 +431,11 @@ const SubQuestionDisplay: React.FC<{
                           />
                         </div>
                         {analysisToggled && (
-                          <div className="flex flex-wrap gap-2">
+                          <div
+                            ref={analysisRef}
+                            onCopy={(e) => handleCopy(e, analysisRef)}
+                            className="flex flex-wrap gap-2"
+                          >
                             {renderedMarkdown}
                           </div>
                         )}

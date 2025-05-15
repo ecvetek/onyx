@@ -1,23 +1,19 @@
 import time
+from enum import Enum
 from http import HTTPStatus
 
 import httpx
 from celery import shared_task
 from celery import Task
 from celery.exceptions import SoftTimeLimitExceeded
-from redis.lock import Lock as RedisLock
+from redis import Redis
 from tenacity import RetryError
 
-from ee.onyx.server.tenants.product_gating import get_gated_tenants
 from onyx.access.access import get_access_for_document
 from onyx.background.celery.apps.app_base import task_logger
-from onyx.background.celery.tasks.beat_schedule import BEAT_EXPIRES_DEFAULT
 from onyx.background.celery.tasks.shared.RetryDocumentIndex import RetryDocumentIndex
-from onyx.configs.constants import CELERY_GENERIC_BEAT_LOCK_TIMEOUT
-from onyx.configs.constants import ONYX_CLOUD_TENANT_ID
-from onyx.configs.constants import OnyxCeleryPriority
+from onyx.configs.constants import ONYX_CELERY_BEAT_HEARTBEAT_KEY
 from onyx.configs.constants import OnyxCeleryTask
-from onyx.configs.constants import OnyxRedisLocks
 from onyx.db.document import delete_document_by_connector_credential_pair__no_commit
 from onyx.db.document import delete_documents_complete__no_commit
 from onyx.db.document import fetch_chunk_count_for_document
@@ -26,16 +22,13 @@ from onyx.db.document import get_document_connector_count
 from onyx.db.document import mark_document_as_modified
 from onyx.db.document import mark_document_as_synced
 from onyx.db.document_set import fetch_document_sets_for_document
-from onyx.db.engine import get_all_tenant_ids
-from onyx.db.engine import get_session_with_tenant
+from onyx.db.engine import get_session_with_current_tenant
 from onyx.db.search_settings import get_active_search_settings
 from onyx.document_index.factory import get_default_document_index
 from onyx.document_index.interfaces import VespaDocumentFields
 from onyx.httpx.httpx_pool import HttpxPool
 from onyx.redis.redis_pool import get_redis_client
-from onyx.redis.redis_pool import redis_lock_dump
 from onyx.server.documents.models import ConnectorCredentialPairIdentifier
-from shared_configs.configs import IGNORED_SYNCING_TENANT_LIST
 
 DOCUMENT_BY_CC_PAIR_CLEANUP_MAX_RETRIES = 3
 
@@ -43,6 +36,24 @@ DOCUMENT_BY_CC_PAIR_CLEANUP_MAX_RETRIES = 3
 # 5 seconds more than RetryDocumentIndex STOP_AFTER+MAX_WAIT
 LIGHT_SOFT_TIME_LIMIT = 105
 LIGHT_TIME_LIMIT = LIGHT_SOFT_TIME_LIMIT + 15
+
+
+class OnyxCeleryTaskCompletionStatus(str, Enum):
+    """The different statuses the watchdog can finish with.
+
+    TODO: create broader success/failure/abort categories
+    """
+
+    UNDEFINED = "undefined"
+
+    SUCCEEDED = "succeeded"
+
+    SKIPPED = "skipped"
+
+    SOFT_TIME_LIMIT = "soft_time_limit"
+
+    NON_RETRYABLE_EXCEPTION = "non_retryable_exception"
+    RETRYABLE_EXCEPTION = "retryable_exception"
 
 
 @shared_task(
@@ -57,7 +68,7 @@ def document_by_cc_pair_cleanup_task(
     document_id: str,
     connector_id: int,
     credential_id: int,
-    tenant_id: str | None,
+    tenant_id: str,
 ) -> bool:
     """A lightweight subtask used to clean up document to cc pair relationships.
     Created by connection deletion and connector pruning parent tasks."""
@@ -78,8 +89,10 @@ def document_by_cc_pair_cleanup_task(
 
     start = time.monotonic()
 
+    completion_status = OnyxCeleryTaskCompletionStatus.UNDEFINED
+
     try:
-        with get_session_with_tenant(tenant_id) as db_session:
+        with get_session_with_current_tenant() as db_session:
             action = "skip"
             chunks_affected = 0
 
@@ -110,6 +123,9 @@ def document_by_cc_pair_cleanup_task(
                     db_session=db_session,
                     document_ids=[document_id],
                 )
+                db_session.commit()
+
+                completion_status = OnyxCeleryTaskCompletionStatus.SUCCEEDED
             elif count > 1:
                 action = "update"
 
@@ -140,6 +156,7 @@ def document_by_cc_pair_cleanup_task(
                     tenant_id=tenant_id,
                     chunk_count=doc.chunk_count,
                     fields=fields,
+                    user_fields=None,
                 )
 
                 # there are still other cc_pair references to the doc, so just resync to Vespa
@@ -153,10 +170,11 @@ def document_by_cc_pair_cleanup_task(
                 )
 
                 mark_document_as_synced(document_id, db_session)
-            else:
-                pass
+                db_session.commit()
 
-            db_session.commit()
+                completion_status = OnyxCeleryTaskCompletionStatus.SUCCEEDED
+            else:
+                completion_status = OnyxCeleryTaskCompletionStatus.SKIPPED
 
             elapsed = time.monotonic() - start
             task_logger.info(
@@ -168,136 +186,90 @@ def document_by_cc_pair_cleanup_task(
             )
     except SoftTimeLimitExceeded:
         task_logger.info(f"SoftTimeLimitExceeded exception. doc={document_id}")
-        return False
+        completion_status = OnyxCeleryTaskCompletionStatus.SOFT_TIME_LIMIT
     except Exception as ex:
         e: Exception | None = None
-        if isinstance(ex, RetryError):
-            task_logger.warning(
-                f"Tenacity retry failed: num_attempts={ex.last_attempt.attempt_number}"
+        while True:
+            if isinstance(ex, RetryError):
+                task_logger.warning(
+                    f"Tenacity retry failed: num_attempts={ex.last_attempt.attempt_number}"
+                )
+
+                # only set the inner exception if it is of type Exception
+                e_temp = ex.last_attempt.exception()
+                if isinstance(e_temp, Exception):
+                    e = e_temp
+            else:
+                e = ex
+
+            if isinstance(e, httpx.HTTPStatusError):
+                if e.response.status_code == HTTPStatus.BAD_REQUEST:
+                    task_logger.exception(
+                        f"Non-retryable HTTPStatusError: "
+                        f"doc={document_id} "
+                        f"status={e.response.status_code}"
+                    )
+                completion_status = (
+                    OnyxCeleryTaskCompletionStatus.NON_RETRYABLE_EXCEPTION
+                )
+                break
+
+            task_logger.exception(
+                f"document_by_cc_pair_cleanup_task exceptioned: doc={document_id}"
             )
 
-            # only set the inner exception if it is of type Exception
-            e_temp = ex.last_attempt.exception()
-            if isinstance(e_temp, Exception):
-                e = e_temp
-        else:
-            e = ex
-
-        if isinstance(e, httpx.HTTPStatusError):
-            if e.response.status_code == HTTPStatus.BAD_REQUEST:
-                task_logger.exception(
-                    f"Non-retryable HTTPStatusError: "
-                    f"doc={document_id} "
-                    f"status={e.response.status_code}"
+            completion_status = OnyxCeleryTaskCompletionStatus.RETRYABLE_EXCEPTION
+            if (
+                self.max_retries is not None
+                and self.request.retries >= self.max_retries
+            ):
+                # This is the last attempt! mark the document as dirty in the db so that it
+                # eventually gets fixed out of band via stale document reconciliation
+                task_logger.warning(
+                    f"Max celery task retries reached. Marking doc as dirty for reconciliation: "
+                    f"doc={document_id}"
                 )
-            return False
+                with get_session_with_current_tenant() as db_session:
+                    # delete the cc pair relationship now and let reconciliation clean it up
+                    # in vespa
+                    delete_document_by_connector_credential_pair__no_commit(
+                        db_session=db_session,
+                        document_id=document_id,
+                        connector_credential_pair_identifier=ConnectorCredentialPairIdentifier(
+                            connector_id=connector_id,
+                            credential_id=credential_id,
+                        ),
+                    )
+                    mark_document_as_modified(document_id, db_session)
+                completion_status = (
+                    OnyxCeleryTaskCompletionStatus.NON_RETRYABLE_EXCEPTION
+                )
+                break
 
-        task_logger.exception(f"Unexpected exception: doc={document_id}")
-
-        if self.request.retries < DOCUMENT_BY_CC_PAIR_CLEANUP_MAX_RETRIES:
-            # Still retrying. Exponential backoff from 2^4 to 2^6 ... i.e. 16, 32, 64
+            # Exponential backoff from 2^4 to 2^6 ... i.e. 16, 32, 64
             countdown = 2 ** (self.request.retries + 4)
-            self.retry(exc=e, countdown=countdown)
-        else:
-            # This is the last attempt! mark the document as dirty in the db so that it
-            # eventually gets fixed out of band via stale document reconciliation
-            task_logger.warning(
-                f"Max celery task retries reached. Marking doc as dirty for reconciliation: "
-                f"doc={document_id}"
-            )
-            with get_session_with_tenant(tenant_id) as db_session:
-                # delete the cc pair relationship now and let reconciliation clean it up
-                # in vespa
-                delete_document_by_connector_credential_pair__no_commit(
-                    db_session=db_session,
-                    document_id=document_id,
-                    connector_credential_pair_identifier=ConnectorCredentialPairIdentifier(
-                        connector_id=connector_id,
-                        credential_id=credential_id,
-                    ),
-                )
-                mark_document_as_modified(document_id, db_session)
+            self.retry(exc=e, countdown=countdown)  # this will raise a celery exception
+            break  # we won't hit this, but it looks weird not to have it
+    finally:
+        task_logger.info(
+            f"document_by_cc_pair_cleanup_task completed: status={completion_status.value} doc={document_id}"
+        )
+
+    if completion_status != OnyxCeleryTaskCompletionStatus.SUCCEEDED:
         return False
 
+    task_logger.info(f"document_by_cc_pair_cleanup_task finished: doc={document_id}")
     return True
 
 
-@shared_task(
-    name=OnyxCeleryTask.CLOUD_BEAT_TASK_GENERATOR,
-    ignore_result=True,
-    trail=False,
-    bind=True,
-)
-def cloud_beat_task_generator(
-    self: Task,
-    task_name: str,
-    queue: str = OnyxCeleryTask.DEFAULT,
-    priority: int = OnyxCeleryPriority.MEDIUM,
-    expires: int = BEAT_EXPIRES_DEFAULT,
-) -> bool | None:
-    """a lightweight task used to kick off individual beat tasks per tenant."""
+@shared_task(name=OnyxCeleryTask.CELERY_BEAT_HEARTBEAT, ignore_result=True, bind=True)
+def celery_beat_heartbeat(self: Task, *, tenant_id: str) -> None:
+    """When this task runs, it writes a key to Redis with a TTL.
+
+    An external observer can check this key to figure out if the celery beat is still running.
+    """
     time_start = time.monotonic()
-
-    redis_client = get_redis_client(tenant_id=ONYX_CLOUD_TENANT_ID)
-
-    lock_beat: RedisLock = redis_client.lock(
-        f"{OnyxRedisLocks.CLOUD_BEAT_TASK_GENERATOR_LOCK}:{task_name}",
-        timeout=CELERY_GENERIC_BEAT_LOCK_TIMEOUT,
-    )
-
-    # these tasks should never overlap
-    if not lock_beat.acquire(blocking=False):
-        return None
-
-    last_lock_time = time.monotonic()
-    tenant_ids: list[str] | list[None] = []
-
-    try:
-        tenant_ids = get_all_tenant_ids()
-        gated_tenants = get_gated_tenants()
-        for tenant_id in tenant_ids:
-            if tenant_id in gated_tenants:
-                continue
-
-            current_time = time.monotonic()
-            if current_time - last_lock_time >= (CELERY_GENERIC_BEAT_LOCK_TIMEOUT / 4):
-                lock_beat.reacquire()
-                last_lock_time = current_time
-
-            # needed in the cloud
-            if IGNORED_SYNCING_TENANT_LIST and tenant_id in IGNORED_SYNCING_TENANT_LIST:
-                continue
-
-            self.app.send_task(
-                task_name,
-                kwargs=dict(
-                    tenant_id=tenant_id,
-                ),
-                queue=queue,
-                priority=priority,
-                expires=expires,
-                ignore_result=True,
-            )
-    except SoftTimeLimitExceeded:
-        task_logger.info(
-            "Soft time limit exceeded, task is being terminated gracefully."
-        )
-    except Exception:
-        task_logger.exception("Unexpected exception during cloud_beat_task_generator")
-    finally:
-        if not lock_beat.owned():
-            task_logger.error(
-                "cloud_beat_task_generator - Lock not owned on completion"
-            )
-            redis_lock_dump(lock_beat, redis_client)
-        else:
-            lock_beat.release()
-
+    r: Redis = get_redis_client()
+    r.set(ONYX_CELERY_BEAT_HEARTBEAT_KEY, 1, ex=600)
     time_elapsed = time.monotonic() - time_start
-    task_logger.info(
-        f"cloud_beat_task_generator finished: "
-        f"task={task_name} "
-        f"num_tenants={len(tenant_ids)} "
-        f"elapsed={time_elapsed:.2f}"
-    )
-    return True
+    task_logger.info(f"celery_beat_heartbeat finished: " f"elapsed={time_elapsed:.2f}")

@@ -9,7 +9,6 @@ import {
 import {
   BackendChatSession,
   BackendMessage,
-  BUFFER_COUNT,
   ChatFileType,
   ChatSession,
   ChatSessionSharedStatus,
@@ -23,6 +22,8 @@ import {
   SubQuestionDetail,
   constructSubQuestions,
   DocumentsResponse,
+  AgenticMessageResponseIDInfo,
+  UserKnowledgeFilePacket,
 } from "./interfaces";
 
 import Prism from "prismjs";
@@ -34,7 +35,6 @@ import {
   buildChatUrl,
   buildLatestMessageChain,
   createChatSession,
-  deleteAllChatSessions,
   getCitedDocumentsFromMessage,
   getHumanAndAIMessageFromMessageNumber,
   getLastSuccessfulMessageId,
@@ -45,7 +45,9 @@ import {
   processRawChatHistory,
   removeMessage,
   sendMessage,
+  SendMessageParams,
   setMessageAsLatest,
+  updateLlmOverrideForChatSession,
   updateParentChildren,
   uploadFilesForChat,
   useScrollonStream,
@@ -53,18 +55,16 @@ import {
 import {
   Dispatch,
   SetStateAction,
-  use,
+  useCallback,
   useContext,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { usePopup } from "@/components/admin/connectors/Popup";
 import { SEARCH_PARAM_NAMES, shouldSubmitOnLoad } from "./searchParams";
-import { useDocumentSelection } from "./useDocumentSelection";
-import { LlmOverride, useFilters, useLlmOverride } from "@/lib/hooks";
+import { LlmDescriptor, useFilters, useLlmManager } from "@/lib/hooks";
 import { ChatState, FeedbackType, RegenerationState } from "./types";
 import { DocumentResults } from "./documentSidebar/DocumentResults";
 import { OnyxInitializingLoader } from "@/components/OnyxInitializingLoader";
@@ -84,32 +84,28 @@ import {
   SubQuestionPiece,
   AgentAnswerPiece,
   RefinedAnswerImprovement,
+  MinimalOnyxDocument,
 } from "@/lib/search/interfaces";
 import { buildFilters } from "@/lib/search/utils";
 import { SettingsContext } from "@/components/settings/SettingsProvider";
 import Dropzone from "react-dropzone";
-import { checkLLMSupportsImageInput, getFinalLLM } from "@/lib/llm/utils";
+import {
+  getFinalLLM,
+  modelSupportsImageInput,
+  structureValue,
+} from "@/lib/llm/utils";
 import { ChatInputBar } from "./input/ChatInputBar";
 import { useChatContext } from "@/components/context/ChatContext";
-import { v4 as uuidv4 } from "uuid";
 import { ChatPopup } from "./ChatPopup";
-
 import FunctionalHeader from "@/components/chat/Header";
 import { useSidebarVisibility } from "@/components/chat/hooks";
 import {
   PRO_SEARCH_TOGGLED_COOKIE_NAME,
   SIDEBAR_TOGGLED_COOKIE_NAME,
 } from "@/components/resizable/constants";
-import FixedLogo from "../../components/logo/FixedLogo";
-
-import { MinimalMarkdown } from "@/components/chat/MinimalMarkdown";
+import FixedLogo from "@/components/logo/FixedLogo";
 import ExceptionTraceModal from "@/components/modals/ExceptionTraceModal";
-
-import {
-  INTERNET_SEARCH_TOOL_ID,
-  SEARCH_TOOL_ID,
-  SEARCH_TOOL_NAME,
-} from "./tools/constants";
+import { SEARCH_TOOL_ID, SEARCH_TOOL_NAME } from "./tools/constants";
 import { useUser } from "@/components/user/UserProvider";
 import { ApiKeyModal } from "@/components/llm/ApiKeyModal";
 import BlurBackground from "../../components/chat/BlurBackground";
@@ -125,32 +121,45 @@ import {
 
 import { getSourceMetadata } from "@/lib/sources";
 import { UserSettingsModal } from "./modal/UserSettingsModal";
-import { AlignStartVertical } from "lucide-react";
 import { AgenticMessage } from "./message/AgenticMessage";
 import AssistantModal from "../assistants/mine/AssistantModal";
+import { useSidebarShortcut } from "@/lib/browserUtilities";
+import { FilePickerModal } from "./my-documents/components/FilePicker";
+
+import { SourceMetadata } from "@/lib/search/interfaces";
+import { ValidSources } from "@/lib/types";
 import {
-  OperatingSystem,
-  useOperatingSystem,
-  useSidebarShortcut,
-} from "@/lib/browserUtilities";
-import { Button } from "@/components/ui/button";
-import { ConfirmEntityModal } from "@/components/modals/ConfirmEntityModal";
-import { MessageChannel } from "node:worker_threads";
+  FileResponse,
+  FolderResponse,
+  useDocumentsContext,
+} from "./my-documents/DocumentsContext";
+import { ChatSearchModal } from "./chat_search/ChatSearchModal";
+import { ErrorBanner } from "./message/Resubmit";
+import MinimalMarkdown from "@/components/chat/MinimalMarkdown";
 
 const TEMP_USER_MESSAGE_ID = -1;
 const TEMP_ASSISTANT_MESSAGE_ID = -2;
 const SYSTEM_MESSAGE_ID = -3;
+
+export enum UploadIntent {
+  ATTACH_TO_MESSAGE, // For files uploaded via ChatInputBar (paste, drag/drop)
+  ADD_TO_DOCUMENTS, // For files uploaded via FilePickerModal or similar (just add to repo)
+}
 
 export function ChatPage({
   toggle,
   documentSidebarInitialWidth,
   sidebarVisible,
   firstMessage,
+  initialFolders,
+  initialFiles,
 }: {
   toggle: (toggled?: boolean) => void;
   documentSidebarInitialWidth?: number;
   sidebarVisible: boolean;
   firstMessage?: string;
+  initialFolders?: any;
+  initialFiles?: any;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -167,11 +176,27 @@ export function ChatPage({
     proSearchToggled,
   } = useChatContext();
 
-  const defaultAssistantIdRaw = searchParams.get(SEARCH_PARAM_NAMES.PERSONA_ID);
+  const {
+    selectedFiles,
+    selectedFolders,
+    addSelectedFile,
+    addSelectedFolder,
+    clearSelectedItems,
+    folders: userFolders,
+    files: allUserFiles,
+    uploadFile,
+    currentMessageFiles,
+    setCurrentMessageFiles,
+  } = useDocumentsContext();
+
+  const defaultAssistantIdRaw = searchParams?.get(
+    SEARCH_PARAM_NAMES.PERSONA_ID
+  );
   const defaultAssistantId = defaultAssistantIdRaw
     ? parseInt(defaultAssistantIdRaw)
     : undefined;
 
+  // Function declarations need to be outside of blocks in strict mode
   function useScreenSize() {
     const [screenSize, setScreenSize] = useState({
       width: typeof window !== "undefined" ? window.innerWidth : 0,
@@ -193,16 +218,6 @@ export function ChatPage({
     return screenSize;
   }
 
-  const { height: screenHeight } = useScreenSize();
-
-  const getContainerHeight = () => {
-    if (autoScrollEnabled) return undefined;
-
-    if (screenHeight < 600) return "20vh";
-    if (screenHeight < 1200) return "30vh";
-    return "40vh";
-  };
-
   // handle redirect if chat page is disabled
   // NOTE: this must be done here, in a client component since
   // settings are passed in via Context and therefore aren't
@@ -210,9 +225,9 @@ export function ChatPage({
   const settings = useContext(SettingsContext);
   const enterpriseSettings = settings?.enterpriseSettings;
 
+  const [toggleDocSelection, setToggleDocSelection] = useState(false);
   const [documentSidebarVisible, setDocumentSidebarVisible] = useState(false);
   const [proSearchEnabled, setProSearchEnabled] = useState(proSearchToggled);
-  const [streamingAllowed, setStreamingAllowed] = useState(false);
   const toggleProSearch = () => {
     Cookies.set(
       PRO_SEARCH_TOGGLED_COOKIE_NAME,
@@ -221,23 +236,20 @@ export function ChatPage({
     setProSearchEnabled(!proSearchEnabled);
   };
 
+  const isInitialLoad = useRef(true);
   const [userSettingsToggled, setUserSettingsToggled] = useState(false);
 
-  const {
-    assistants: availableAssistants,
-    finalAssistants,
-    pinnedAssistants,
-  } = useAssistants();
+  const { assistants: availableAssistants, pinnedAssistants } = useAssistants();
 
   const [showApiKeyModal, setShowApiKeyModal] = useState(
     !shouldShowWelcomeModal
   );
 
   const { user, isAdmin } = useUser();
-  const slackChatId = searchParams.get("slackChatId");
-  const existingChatIdRaw = searchParams.get("chatId");
+  const slackChatId = searchParams?.get("slackChatId");
+  const existingChatIdRaw = searchParams?.get("chatId");
 
-  const [showHistorySidebar, setShowHistorySidebar] = useState(false); // State to track if sidebar is open
+  const [showHistorySidebar, setShowHistorySidebar] = useState(false);
 
   const existingChatSessionId = existingChatIdRaw ? existingChatIdRaw : null;
 
@@ -257,7 +269,7 @@ export function ChatPage({
 
   const processSearchParamsAndSubmitMessage = (searchParamsString: string) => {
     const newSearchParams = new URLSearchParams(searchParamsString);
-    const message = newSearchParams.get("user-prompt");
+    const message = newSearchParams?.get("user-prompt");
 
     filterManager.buildFiltersFromQueryString(
       newSearchParams.toString(),
@@ -266,7 +278,7 @@ export function ChatPage({
       tags
     );
 
-    const fileDescriptorString = newSearchParams.get(SEARCH_PARAM_NAMES.FILES);
+    const fileDescriptorString = newSearchParams?.get(SEARCH_PARAM_NAMES.FILES);
     const overrideFileDescriptors: FileDescriptor[] = fileDescriptorString
       ? JSON.parse(decodeURIComponent(fileDescriptorString))
       : [];
@@ -306,19 +318,9 @@ export function ChatPage({
         : undefined
   );
   // Gather default temperature settings
-  const search_param_temperature = searchParams.get(
+  const search_param_temperature = searchParams?.get(
     SEARCH_PARAM_NAMES.TEMPERATURE
   );
-
-  const defaultTemperature = search_param_temperature
-    ? parseFloat(search_param_temperature)
-    : selectedAssistant?.tools.some(
-          (tool) =>
-            tool.in_code_tool_id === SEARCH_TOOL_ID ||
-            tool.in_code_tool_id === INTERNET_SEARCH_TOOL_ID
-        )
-      ? 0
-      : 0.7;
 
   const setSelectedAssistantFromId = (assistantId: number) => {
     // NOTE: also intentionally look through available assistants here, so that
@@ -333,7 +335,7 @@ export function ChatPage({
     useState<Persona | null>(null);
 
   const [presentingDocument, setPresentingDocument] =
-    useState<OnyxDocument | null>(null);
+    useState<MinimalOnyxDocument | null>(null);
 
   // Current assistant is decided based on this ordering
   // 1. Alternative assistant (assistant selected explicitly by user)
@@ -355,7 +357,7 @@ export function ChatPage({
     ]
   );
 
-  const llmOverrideManager = useLlmOverride(
+  const llmManager = useLlmManager(
     llmProviders,
     selectedChatSession,
     liveAssistant
@@ -363,9 +365,14 @@ export function ChatPage({
 
   const noAssistants = liveAssistant == null || liveAssistant == undefined;
 
-  const availableSources = ccPairs.map((ccPair) => ccPair.source);
-  const uniqueSources = Array.from(new Set(availableSources));
-  const sources = uniqueSources.map((source) => getSourceMetadata(source));
+  const availableSources: ValidSources[] = useMemo(() => {
+    return ccPairs.map((ccPair) => ccPair.source);
+  }, [ccPairs]);
+
+  const sources: SourceMetadata[] = useMemo(() => {
+    const uniqueSources = Array.from(new Set(availableSources));
+    return uniqueSources.map((source) => getSourceMetadata(source));
+  }, [availableSources]);
 
   const stopGenerating = () => {
     const currentSession = currentSessionId();
@@ -439,7 +446,6 @@ export function ChatPage({
     const isChatSessionSwitch = existingChatSessionId !== priorChatSessionId;
     if (isChatSessionSwitch) {
       // de-select documents
-      clearSelectedDocuments();
 
       // reset all filters
       filterManager.setSelectedDocumentSets([]);
@@ -453,6 +459,7 @@ export function ChatPage({
       // if switching from one chat to another, then need to scroll again
       // if we're creating a brand new chat, then don't need to scroll
       if (chatSessionIdRef.current !== null) {
+        clearSelectedDocuments();
         setHasPerformedInitialScroll(false);
       }
     }
@@ -479,7 +486,6 @@ export function ChatPage({
         return;
       }
 
-      clearSelectedDocuments();
       setIsFetchingChatMessages(true);
       const response = await fetch(
         `/api/chat/get-chat-session/${existingChatSessionId}`
@@ -519,8 +525,17 @@ export function ChatPage({
       scrollInitialized.current = false;
 
       if (!hasPerformedInitialScroll) {
+        if (isInitialLoad.current) {
+          setHasPerformedInitialScroll(true);
+          isInitialLoad.current = false;
+        }
         clientScrollToBottom();
+
+        setTimeout(() => {
+          setHasPerformedInitialScroll(true);
+        }, 100);
       } else if (isChatSessionSwitch) {
+        setHasPerformedInitialScroll(true);
         clientScrollToBottom(true);
       }
 
@@ -530,7 +545,7 @@ export function ChatPage({
       if (
         newMessageHistory.length === 1 &&
         !submitOnLoadPerformed.current &&
-        searchParams.get(SEARCH_PARAM_NAMES.SEEDED) === "true"
+        searchParams?.get(SEARCH_PARAM_NAMES.SEEDED) === "true"
       ) {
         submitOnLoadPerformed.current = true;
         const seededMessage = newMessageHistory[0].message;
@@ -551,10 +566,41 @@ export function ChatPage({
 
     initialSessionFetch();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [existingChatSessionId, searchParams.get(SEARCH_PARAM_NAMES.PERSONA_ID)]);
+  }, [existingChatSessionId, searchParams?.get(SEARCH_PARAM_NAMES.PERSONA_ID)]);
+
+  useEffect(() => {
+    const userFolderId = searchParams?.get(SEARCH_PARAM_NAMES.USER_FOLDER_ID);
+    const allMyDocuments = searchParams?.get(
+      SEARCH_PARAM_NAMES.ALL_MY_DOCUMENTS
+    );
+
+    if (userFolderId) {
+      const userFolder = userFolders.find(
+        (folder) => folder.id === parseInt(userFolderId)
+      );
+      if (userFolder) {
+        addSelectedFolder(userFolder);
+      }
+    } else if (allMyDocuments === "true" || allMyDocuments === "1") {
+      // Clear any previously selected folders
+
+      clearSelectedItems();
+
+      // Add all user folders to the current context
+      userFolders.forEach((folder) => {
+        addSelectedFolder(folder);
+      });
+    }
+  }, [
+    userFolders,
+    searchParams?.get(SEARCH_PARAM_NAMES.USER_FOLDER_ID),
+    searchParams?.get(SEARCH_PARAM_NAMES.ALL_MY_DOCUMENTS),
+    addSelectedFolder,
+    clearSelectedItems,
+  ]);
 
   const [message, setMessage] = useState(
-    searchParams.get(SEARCH_PARAM_NAMES.USER_PROMPT) || ""
+    searchParams?.get(SEARCH_PARAM_NAMES.USER_PROMPT) || ""
   );
 
   const [completeMessageDetail, setCompleteMessageDetail] = useState<
@@ -592,7 +638,7 @@ export function ChatPage({
   }: {
     messages: Message[];
     // if calling this function repeatedly with short delay, stay may not update in time
-    // and result in weird behavipr
+    // and result in weird behavior
     completeMessageMapOverride?: Map<number, Message> | null;
     chatSessionId?: string;
     replacementsMap?: Map<number, number> | null;
@@ -660,6 +706,7 @@ export function ChatPage({
       chatSessionId || currentSessionId(),
       newCompleteMessageMap
     );
+    console.log(newCompleteMessageDetail);
     return newCompleteMessageDetail;
   };
 
@@ -797,22 +844,17 @@ export function ChatPage({
   const currentSessionChatState = currentChatState();
   const currentSessionRegenerationState = currentRegenerationState();
 
-  // uploaded files
-  const [currentMessageFiles, setCurrentMessageFiles] = useState<
-    FileDescriptor[]
-  >([]);
-
   // for document display
   // NOTE: -1 is a special designation that means the latest AI message
   const [selectedMessageForDocDisplay, setSelectedMessageForDocDisplay] =
     useState<number | null>(null);
 
-  const { aiMessage } = selectedMessageForDocDisplay
+  const { aiMessage, humanMessage } = selectedMessageForDocDisplay
     ? getHumanAndAIMessageFromMessageNumber(
         messageHistory,
         selectedMessageForDocDisplay
       )
-    : { aiMessage: null };
+    : { aiMessage: null, humanMessage: null };
 
   const [chatSessionSharedStatus, setChatSessionSharedStatus] =
     useState<ChatSessionSharedStatus>(ChatSessionSharedStatus.Private);
@@ -838,13 +880,6 @@ export function ChatPage({
       );
     }
   }, [submittedMessage, currentSessionChatState]);
-
-  const [
-    selectedDocuments,
-    toggleDocumentSelection,
-    clearSelectedDocuments,
-    selectedDocumentTokens,
-  ] = useDocumentSelection();
   // just choose a conservative default, this will be updated in the
   // background on initial load / on persona change
   const [maxTokens, setMaxTokens] = useState<number>(4096);
@@ -864,6 +899,7 @@ export function ChatPage({
   }, [liveAssistant]);
 
   const filterManager = useFilters();
+  const [isChatSearchModalOpen, setIsChatSearchModalOpen] = useState(false);
 
   const [currentFeedback, setCurrentFeedback] = useState<
     [FeedbackType, number] | null
@@ -884,24 +920,6 @@ export function ChatPage({
     inputRef.current?.getBoundingClientRect().height!
   );
   const scrollDist = useRef<number>(0);
-
-  const updateScrollTracking = () => {
-    const scrollDistance =
-      endDivRef?.current?.getBoundingClientRect()?.top! -
-      inputRef?.current?.getBoundingClientRect()?.top!;
-    scrollDist.current = scrollDistance;
-    setAboveHorizon(scrollDist.current > 500);
-  };
-
-  useEffect(() => {
-    const scrollableDiv = scrollableDivRef.current;
-    if (scrollableDiv) {
-      scrollableDiv.addEventListener("scroll", updateScrollTracking);
-      return () => {
-        scrollableDiv.removeEventListener("scroll", updateScrollTracking);
-      };
-    }
-  }, []);
 
   const handleInputResize = () => {
     setTimeout(() => {
@@ -954,33 +972,12 @@ export function ChatPage({
       if (isVisible) return;
 
       // Check if all messages are currently rendered
-      if (currentVisibleRange.end < messageHistory.length) {
-        // Update visible range to include the last messages
-        updateCurrentVisibleRange({
-          start: Math.max(
-            0,
-            messageHistory.length -
-              (currentVisibleRange.end - currentVisibleRange.start)
-          ),
-          end: messageHistory.length,
-          mostVisibleMessageId: currentVisibleRange.mostVisibleMessageId,
-        });
+      // If all messages are already rendered, scroll immediately
+      endDivRef.current.scrollIntoView({
+        behavior: fast ? "auto" : "smooth",
+      });
 
-        // Wait for the state update and re-render before scrolling
-        setTimeout(() => {
-          endDivRef.current?.scrollIntoView({
-            behavior: fast ? "auto" : "smooth",
-          });
-          setHasPerformedInitialScroll(true);
-        }, 100);
-      } else {
-        // If all messages are already rendered, scroll immediately
-        endDivRef.current.scrollIntoView({
-          behavior: fast ? "auto" : "smooth",
-        });
-
-        setHasPerformedInitialScroll(true);
-      }
+      setHasPerformedInitialScroll(true);
     }, 50);
 
     // Reset waitForScrollRef after 1.5 seconds
@@ -1000,11 +997,6 @@ export function ChatPage({
   useEffect(() => {
     handleInputResize();
   }, [message]);
-
-  // tracks scrolling
-  useEffect(() => {
-    updateScrollTracking();
-  }, [messageHistory]);
 
   // used for resizing of the document sidebar
   const masterFlexboxRef = useRef<HTMLDivElement>(null);
@@ -1051,7 +1043,7 @@ export function ChatPage({
 
   // Equivalent to `loadNewPageLogic`
   useEffect(() => {
-    if (searchParams.get(SEARCH_PARAM_NAMES.SEND_ON_LOAD)) {
+    if (searchParams?.get(SEARCH_PARAM_NAMES.SEND_ON_LOAD)) {
       processSearchParamsAndSubmitMessage(searchParams.toString());
     }
   }, [searchParams, router]);
@@ -1090,7 +1082,7 @@ export function ChatPage({
 
   async function updateCurrentMessageFIFO(
     stack: CurrentMessageFIFO,
-    params: any
+    params: SendMessageParams
   ) {
     try {
       for await (const packet of sendMessage(params)) {
@@ -1129,6 +1121,63 @@ export function ChatPage({
     });
   };
   const [uncaughtError, setUncaughtError] = useState<string | null>(null);
+  const [agenticGenerating, setAgenticGenerating] = useState(false);
+
+  const autoScrollEnabled =
+    (user?.preferences?.auto_scroll && !agenticGenerating) ?? false;
+
+  useScrollonStream({
+    chatState: currentSessionChatState,
+    scrollableDivRef,
+    scrollDist,
+    endDivRef,
+    debounceNumber,
+    mobile: settings?.isMobile,
+    enableAutoScroll: autoScrollEnabled,
+  });
+
+  // Track whether a message has been sent during this page load, keyed by chat session id
+  const [sessionHasSentLocalUserMessage, setSessionHasSentLocalUserMessage] =
+    useState<Map<string | null, boolean>>(new Map());
+
+  // Update the local state for a session once the user sends a message
+  const markSessionMessageSent = (sessionId: string | null) => {
+    setSessionHasSentLocalUserMessage((prev) => {
+      const newMap = new Map(prev);
+      newMap.set(sessionId, true);
+      return newMap;
+    });
+  };
+  const currentSessionHasSentLocalUserMessage = useMemo(
+    () => (sessionId: string | null) => {
+      return sessionHasSentLocalUserMessage.size === 0
+        ? undefined
+        : sessionHasSentLocalUserMessage.get(sessionId) || false;
+    },
+    [sessionHasSentLocalUserMessage]
+  );
+
+  const { height: screenHeight } = useScreenSize();
+
+  const getContainerHeight = useMemo(() => {
+    return () => {
+      if (!currentSessionHasSentLocalUserMessage(chatSessionIdRef.current)) {
+        return undefined;
+      }
+      if (autoScrollEnabled) return undefined;
+
+      if (screenHeight < 600) return "40vh";
+      if (screenHeight < 1200) return "50vh";
+      return "60vh";
+    };
+  }, [autoScrollEnabled, screenHeight, currentSessionHasSentLocalUserMessage]);
+
+  const reset = () => {
+    setMessage("");
+    setCurrentMessageFiles([]);
+    clearSelectedItems();
+    setLoadingError(null);
+  };
 
   const onSubmit = async ({
     messageIdToResend,
@@ -1137,7 +1186,7 @@ export function ChatPage({
     forceSearch,
     isSeededChat,
     alternativeAssistantOverride = null,
-    modelOverRide,
+    modelOverride,
     regenerationRequest,
     overrideFileDescriptors,
   }: {
@@ -1147,13 +1196,73 @@ export function ChatPage({
     forceSearch?: boolean;
     isSeededChat?: boolean;
     alternativeAssistantOverride?: Persona | null;
-    modelOverRide?: LlmOverride;
+    modelOverride?: LlmDescriptor;
     regenerationRequest?: RegenerationRequest | null;
     overrideFileDescriptors?: FileDescriptor[];
   } = {}) => {
     navigatingAway.current = false;
     let frozenSessionId = currentSessionId();
     updateCanContinue(false, frozenSessionId);
+    setUncaughtError(null);
+    setLoadingError(null);
+
+    // Mark that we've sent a message for this session in the current page load
+    markSessionMessageSent(frozenSessionId);
+
+    // Check if the last message was an error and remove it before proceeding with a new message
+    // Ensure this isn't a regeneration or resend, as those operations should preserve the history leading up to the point of regeneration/resend.
+    let currentMap = currentMessageMap(completeMessageDetail);
+    let currentHistory = buildLatestMessageChain(currentMap);
+    let lastMessage = currentHistory[currentHistory.length - 1];
+
+    if (
+      lastMessage &&
+      lastMessage.type === "error" &&
+      !messageIdToResend &&
+      !regenerationRequest
+    ) {
+      const newMap = new Map(currentMap);
+      const parentId = lastMessage.parentMessageId;
+
+      // Remove the error message itself
+      newMap.delete(lastMessage.messageId);
+
+      // Remove the parent message + update the parent of the parent to no longer
+      // link to the parent
+      if (parentId !== null && parentId !== undefined) {
+        const parentOfError = newMap.get(parentId);
+        if (parentOfError) {
+          const grandparentId = parentOfError.parentMessageId;
+          if (grandparentId !== null && grandparentId !== undefined) {
+            const grandparent = newMap.get(grandparentId);
+            if (grandparent) {
+              // Update grandparent to no longer link to parent
+              const updatedGrandparent = {
+                ...grandparent,
+                childrenMessageIds: (
+                  grandparent.childrenMessageIds || []
+                ).filter((id) => id !== parentId),
+                latestChildMessageId:
+                  grandparent.latestChildMessageId === parentId
+                    ? null
+                    : grandparent.latestChildMessageId,
+              };
+              newMap.set(grandparentId, updatedGrandparent);
+            }
+          }
+          // Remove the parent message
+          newMap.delete(parentId);
+        }
+      }
+      // Update the state immediately so subsequent logic uses the cleaned map
+      updateCompleteMessageDetail(frozenSessionId, newMap);
+      console.log("Removed previous error message ID:", lastMessage.messageId);
+
+      // update state for the new world (with the error message removed)
+      currentHistory = buildLatestMessageChain(newMap);
+      currentMap = newMap;
+      lastMessage = currentHistory[currentHistory.length - 1];
+    }
 
     if (currentChatState() != "input") {
       if (currentChatState() == "uploading") {
@@ -1179,7 +1288,7 @@ export function ChatPage({
     const isNewSession = chatSessionIdRef.current === null;
 
     const searchParamBasedChatSessionName =
-      searchParams.get(SEARCH_PARAM_NAMES.TITLE) || null;
+      searchParams?.get(SEARCH_PARAM_NAMES.TITLE) || null;
 
     if (isNewSession) {
       currChatSessionId = await createChatSession(
@@ -1190,6 +1299,22 @@ export function ChatPage({
       currChatSessionId = chatSessionIdRef.current as string;
     }
     frozenSessionId = currChatSessionId;
+    // update the selected model for the chat session if one is specified so that
+    // it persists across page reloads. Do not `await` here so that the message
+    // request can continue and this will just happen in the background.
+    // NOTE: only set the model override for the chat session once we send a
+    // message with it. If the user switches models and then starts a new
+    // chat session, it is unexpected for that model to be used when they
+    // return to this session the next day.
+    let finalLLM = modelOverride || llmManager.currentLlm;
+    updateLlmOverrideForChatSession(
+      currChatSessionId,
+      structureValue(
+        finalLLM.name || "",
+        finalLLM.provider || "",
+        finalLLM.modelName || ""
+      )
+    );
 
     updateStatesWithNewSessionId(currChatSessionId);
 
@@ -1208,11 +1333,10 @@ export function ChatPage({
         currentSessionId()
       );
     }
-    const messageMap = currentMessageMap(completeMessageDetail);
     const messageToResendParent =
       messageToResend?.parentMessageId !== null &&
       messageToResend?.parentMessageId !== undefined
-        ? messageMap.get(messageToResend.parentMessageId)
+        ? currentMap.get(messageToResend.parentMessageId)
         : null;
     const messageToResendIndex = messageToResend
       ? messageHistory.indexOf(messageToResend)
@@ -1239,21 +1363,24 @@ export function ChatPage({
 
     const currMessageHistory =
       messageToResendIndex !== null
-        ? messageHistory.slice(0, messageToResendIndex)
-        : messageHistory;
+        ? currentHistory.slice(0, messageToResendIndex)
+        : currentHistory;
 
     let parentMessage =
       messageToResendParent ||
       (currMessageHistory.length > 0
         ? currMessageHistory[currMessageHistory.length - 1]
         : null) ||
-      (messageMap.size === 1 ? Array.from(messageMap.values())[0] : null);
+      (currentMap.size === 1 ? Array.from(currentMap.values())[0] : null);
 
-    const currentAssistantId = alternativeAssistantOverride
-      ? alternativeAssistantOverride.id
-      : alternativeAssistant
-        ? alternativeAssistant.id
-        : liveAssistant.id;
+    let currentAssistantId;
+    if (alternativeAssistantOverride) {
+      currentAssistantId = alternativeAssistantOverride.id;
+    } else if (alternativeAssistant) {
+      currentAssistantId = alternativeAssistant.id;
+    } else {
+      currentAssistantId = liveAssistant.id;
+    }
 
     resetInputBar();
     let messageUpdates: Message[] | null = null;
@@ -1280,6 +1407,10 @@ export function ChatPage({
     let toolCall: ToolCallMetadata | null = null;
     let isImprovement: boolean | undefined = undefined;
     let isStreamingQuestions = true;
+    let includeAgentic = false;
+    let secondLevelMessageId: number | null = null;
+    let isAgentic: boolean = false;
+    let files: FileDescriptor[] = [];
 
     let initialFetchDetails: null | {
       user_message_id: number;
@@ -1287,15 +1418,12 @@ export function ChatPage({
       frozenMessageMap: Map<number, Message>;
     } = null;
     try {
-      const mapKeys = Array.from(
-        currentMessageMap(completeMessageDetail).keys()
-      );
-      const systemMessage = Math.min(...mapKeys);
-
+      const mapKeys = Array.from(currentMap.keys());
       const lastSuccessfulMessageId =
-        getLastSuccessfulMessageId(currMessageHistory) || systemMessage;
+        getLastSuccessfulMessageId(currMessageHistory);
 
       const stack = new CurrentMessageFIFO();
+
       updateCurrentMessageFIFO(stack, {
         signal: controller.signal,
         message: currMessage,
@@ -1305,12 +1433,13 @@ export function ChatPage({
           regenerationRequest?.parentMessage.messageId ||
           lastSuccessfulMessageId,
         chatSessionId: currChatSessionId,
-        promptId: liveAssistant?.prompts[0]?.id || 0,
         filters: buildFilters(
           filterManager.selectedSources,
           filterManager.selectedDocumentSets,
           filterManager.timeRange,
-          filterManager.selectedTags
+          filterManager.selectedTags,
+          selectedFiles.map((file) => file.id),
+          selectedFolders.map((folder) => folder.id)
         ),
         selectedDocumentIds: selectedDocuments
           .filter(
@@ -1320,22 +1449,25 @@ export function ChatPage({
           .map((document) => document.db_doc_id as number),
         queryOverride,
         forceSearch,
+        userFolderIds: selectedFolders.map((folder) => folder.id),
+        userFileIds: selectedFiles
+          .filter((file) => file.id !== undefined && file.id !== null)
+          .map((file) => file.id),
+
         regenerate: regenerationRequest !== undefined,
         modelProvider:
-          modelOverRide?.name ||
-          llmOverrideManager.llmOverride.name ||
-          undefined,
+          modelOverride?.name || llmManager.currentLlm.name || undefined,
         modelVersion:
-          modelOverRide?.modelName ||
-          llmOverrideManager.llmOverride.modelName ||
-          searchParams.get(SEARCH_PARAM_NAMES.MODEL_VERSION) ||
+          modelOverride?.modelName ||
+          llmManager.currentLlm.modelName ||
+          searchParams?.get(SEARCH_PARAM_NAMES.MODEL_VERSION) ||
           undefined,
-        temperature: llmOverrideManager.temperature || undefined,
+        temperature: llmManager.temperature || undefined,
         systemPromptOverride:
-          searchParams.get(SEARCH_PARAM_NAMES.SYSTEM_PROMPT) || undefined,
+          searchParams?.get(SEARCH_PARAM_NAMES.SYSTEM_PROMPT) || undefined,
         useExistingUserMessage: isSeededChat,
         useLanggraph:
-          !settings?.settings.pro_search_disabled &&
+          settings?.settings.pro_search_enabled &&
           proSearchEnabled &&
           retrievalEnabled,
       });
@@ -1355,6 +1487,7 @@ export function ChatPage({
           if (!packet) {
             continue;
           }
+          console.log("Packet:", JSON.stringify(packet));
 
           if (!initialFetchDetails) {
             if (!Object.hasOwn(packet, "user_message_id")) {
@@ -1384,7 +1517,7 @@ export function ChatPage({
                   : user_message_id,
                 message: currMessage,
                 type: "user",
-                files: currentMessageFiles,
+                files: files,
                 toolCall: null,
                 parentMessageId: parentMessage?.messageId || SYSTEM_MESSAGE_ID,
               },
@@ -1404,11 +1537,12 @@ export function ChatPage({
               upsertToCompleteMessageMap({
                 messages: messageUpdates,
                 chatSessionId: currChatSessionId,
+                completeMessageMapOverride: currentMap,
               });
+            currentMap = currentFrozenMessageMap;
 
-            const frozenMessageMap = currentFrozenMessageMap;
             initialFetchDetails = {
-              frozenMessageMap,
+              frozenMessageMap: currentMap,
               assistant_message_id,
               user_message_id,
             };
@@ -1416,6 +1550,17 @@ export function ChatPage({
             resetRegenerationState();
           } else {
             const { user_message_id, frozenMessageMap } = initialFetchDetails;
+            if (Object.hasOwn(packet, "agentic_message_ids")) {
+              const agenticMessageIds = (packet as AgenticMessageResponseIDInfo)
+                .agentic_message_ids;
+              const level1MessageId = agenticMessageIds.find(
+                (item) => item.level === 1
+              )?.message_id;
+              if (level1MessageId) {
+                secondLevelMessageId = level1MessageId;
+                includeAgentic = true;
+              }
+            }
 
             setChatState((prevState) => {
               if (prevState.get(chatSessionIdRef.current!) === "loading") {
@@ -1431,6 +1576,18 @@ export function ChatPage({
               if ((packet as any).level === 1) {
                 second_level_generating = true;
               }
+            }
+            if (Object.hasOwn(packet, "user_files")) {
+              const userFiles = (packet as UserKnowledgeFilePacket).user_files;
+              // Ensure files are unique by id
+              const newUserFiles = userFiles.filter(
+                (newFile) =>
+                  !files.some((existingFile) => existingFile.id === newFile.id)
+              );
+              files = files.concat(newUserFiles);
+            }
+            if (Object.hasOwn(packet, "is_agentic")) {
+              isAgentic = (packet as any).is_agentic;
             }
 
             if (Object.hasOwn(packet, "refined_answer_improvement")) {
@@ -1465,6 +1622,7 @@ export function ChatPage({
               );
             } else if (Object.hasOwn(packet, "sub_question")) {
               updateChatState("toolBuilding", frozenSessionId);
+              isAgentic = true;
               is_generating = true;
               sub_questions = constructSubQuestions(
                 sub_questions,
@@ -1567,7 +1725,10 @@ export function ChatPage({
                   };
                 }
               );
-            } else if (Object.hasOwn(packet, "error")) {
+            } else if (
+              Object.hasOwn(packet, "error") &&
+              (packet as any).error != null
+            ) {
               if (
                 sub_questions.length > 0 &&
                 sub_questions
@@ -1579,8 +1740,8 @@ export function ChatPage({
                 setAgenticGenerating(false);
                 setAlternativeGeneratingAssistant(null);
                 setSubmittedMessage("");
-                return;
-                // throw new Error((packet as StreamingError).error);
+
+                throw new Error((packet as StreamingError).error);
               } else {
                 error = (packet as StreamingError).error;
                 stackTrace = (packet as StreamingError).stack_trace;
@@ -1613,14 +1774,18 @@ export function ChatPage({
                   ] as [number, number][])
                 : null;
 
-              return upsertToCompleteMessageMap({
+              const newMessageDetails = upsertToCompleteMessageMap({
                 messages: messages,
                 replacementsMap: replacementsMap,
-                completeMessageMapOverride: frozenMessageMap,
+                // Pass the latest map state
+                completeMessageMapOverride: currentMap,
                 chatSessionId: frozenSessionId!,
               });
+              currentMap = newMessageDetails.messageMap;
+              return newMessageDetails;
             };
 
+            const systemMessageId = Math.min(...mapKeys);
             updateFn([
               {
                 messageId: regenerationRequest
@@ -1628,9 +1793,10 @@ export function ChatPage({
                   : initialFetchDetails.user_message_id!,
                 message: currMessage,
                 type: "user",
-                files: currentMessageFiles,
+                files: files,
                 toolCall: null,
-                parentMessageId: error ? null : lastSuccessfulMessageId,
+                // in the frontend, every message should have a parent ID
+                parentMessageId: lastSuccessfulMessageId ?? systemMessageId,
                 childrenMessageIds: [
                   ...(regenerationRequest?.parentMessage?.childrenMessageIds ||
                     []),
@@ -1662,14 +1828,29 @@ export function ChatPage({
                 sub_questions: sub_questions,
                 second_level_generating: second_level_generating,
                 agentic_docs: agenticDocs,
+                is_agentic: isAgentic,
               },
+              ...(includeAgentic
+                ? [
+                    {
+                      messageId: secondLevelMessageId!,
+                      message: second_level_answer,
+                      type: "assistant" as const,
+                      files: [],
+                      toolCall: null,
+                      parentMessageId:
+                        initialFetchDetails.assistant_message_id!,
+                    },
+                  ]
+                : []),
             ]);
           }
         }
       }
     } catch (e: any) {
+      console.log("Error:", e);
       const errorMsg = e.message;
-      upsertToCompleteMessageMap({
+      const newMessageDetails = upsertToCompleteMessageMap({
         messages: [
           {
             messageId:
@@ -1692,14 +1873,17 @@ export function ChatPage({
               initialFetchDetails?.user_message_id || TEMP_USER_MESSAGE_ID,
           },
         ],
-        completeMessageMapOverride: currentMessageMap(completeMessageDetail),
+        completeMessageMapOverride: currentMap,
       });
+      currentMap = newMessageDetails.messageMap;
     }
+    console.log("Finished streaming");
     setAgenticGenerating(false);
     resetRegenerationState(currentSessionId());
 
     updateChatState("input");
     if (isNewSession) {
+      console.log("Setting up new session");
       if (finalMessage) {
         setSelectedMessageForDocDisplay(finalMessage.message_id);
       }
@@ -1767,13 +1951,16 @@ export function ChatPage({
     }
   };
 
-  const handleImageUpload = async (acceptedFiles: File[]) => {
+  const handleImageUpload = async (
+    acceptedFiles: File[],
+    intent: UploadIntent
+  ) => {
     const [_, llmModel] = getFinalLLM(
       llmProviders,
       liveAssistant,
-      llmOverrideManager.llmOverride
+      llmManager.currentLlm
     );
-    const llmAcceptsImages = checkLLMSupportsImageInput(llmModel);
+    const llmAcceptsImages = modelSupportsImageInput(llmProviders, llmModel);
 
     const imageFiles = acceptedFiles.filter((file) =>
       file.type.startsWith("image/")
@@ -1788,45 +1975,50 @@ export function ChatPage({
       return;
     }
 
-    const tempFileDescriptors = acceptedFiles.map((file) => ({
-      id: uuidv4(),
-      type: file.type.startsWith("image/")
-        ? ChatFileType.IMAGE
-        : ChatFileType.DOCUMENT,
-      isUploading: true,
-    }));
-
-    // only show loading spinner for reasonably large files
-    const totalSize = acceptedFiles.reduce((sum, file) => sum + file.size, 0);
-    if (totalSize > 50 * 1024) {
-      setCurrentMessageFiles((prev) => [...prev, ...tempFileDescriptors]);
-    }
-
-    const removeTempFiles = (prev: FileDescriptor[]) => {
-      return prev.filter(
-        (file) => !tempFileDescriptors.some((newFile) => newFile.id === file.id)
-      );
-    };
     updateChatState("uploading", currentSessionId());
 
-    await uploadFilesForChat(acceptedFiles).then(([files, error]) => {
-      if (error) {
-        setCurrentMessageFiles((prev) => removeTempFiles(prev));
+    const newlyUploadedFileDescriptors: FileDescriptor[] = [];
+
+    for (let file of acceptedFiles) {
+      const formData = new FormData();
+      formData.append("files", file);
+      const response: FileResponse[] = await uploadFile(formData, null);
+
+      if (response.length > 0) {
+        const uploadedFile = response[0];
+
+        if (intent == UploadIntent.ADD_TO_DOCUMENTS) {
+          addSelectedFile(uploadedFile);
+        } else {
+          const newFileDescriptor: FileDescriptor = {
+            // Use file_id (storage ID) if available, otherwise fallback to DB id
+            // Ensure it's a string as FileDescriptor expects
+            id: uploadedFile.file_id
+              ? String(uploadedFile.file_id)
+              : String(uploadedFile.id),
+            type: uploadedFile.chat_file_type
+              ? uploadedFile.chat_file_type
+              : ChatFileType.PLAIN_TEXT,
+            name: uploadedFile.name,
+            isUploading: false, // Mark as successfully uploaded
+          };
+
+          setCurrentMessageFiles((prev) => [...prev, newFileDescriptor]);
+        }
+      } else {
         setPopup({
           type: "error",
-          message: error,
+          message: "Failed to upload file",
         });
-      } else {
-        setCurrentMessageFiles((prev) => [...removeTempFiles(prev), ...files]);
       }
-    });
+    }
+
     updateChatState("input", currentSessionId());
   };
 
   // Used to maintain a "time out" for history sidebar so our existing refs can have time to process change
   const [untoggled, setUntoggled] = useState(false);
   const [loadingError, setLoadingError] = useState<string | null>(null);
-  const [agenticGenerating, setAgenticGenerating] = useState(false);
 
   const explicitlyUntoggle = () => {
     setShowHistorySidebar(false);
@@ -1868,139 +2060,8 @@ export function ChatPage({
     isAnonymousUser: user?.is_anonymous_user,
   });
 
-  const autoScrollEnabled =
-    user?.preferences?.auto_scroll == null
-      ? settings?.enterpriseSettings?.auto_scroll || false
-      : user?.preferences?.auto_scroll! && !agenticGenerating;
-
-  useScrollonStream({
-    chatState: currentSessionChatState,
-    scrollableDivRef,
-    scrollDist,
-    endDivRef,
-    debounceNumber,
-    mobile: settings?.isMobile,
-    enableAutoScroll: autoScrollEnabled,
-  });
-
   // Virtualization + Scrolling related effects and functions
   const scrollInitialized = useRef(false);
-  interface VisibleRange {
-    start: number;
-    end: number;
-    mostVisibleMessageId: number | null;
-  }
-
-  const [visibleRange, setVisibleRange] = useState<
-    Map<string | null, VisibleRange>
-  >(() => {
-    const initialRange: VisibleRange = {
-      start: 0,
-      end: BUFFER_COUNT,
-      mostVisibleMessageId: null,
-    };
-    return new Map([[chatSessionIdRef.current, initialRange]]);
-  });
-
-  // Function used to update current visible range. Only method for updating `visibleRange` state.
-  const updateCurrentVisibleRange = (
-    newRange: VisibleRange,
-    forceUpdate?: boolean
-  ) => {
-    if (
-      scrollInitialized.current &&
-      visibleRange.get(loadedIdSessionRef.current) == undefined &&
-      !forceUpdate
-    ) {
-      return;
-    }
-
-    setVisibleRange((prevState) => {
-      const newState = new Map(prevState);
-      newState.set(loadedIdSessionRef.current, newRange);
-      return newState;
-    });
-  };
-
-  //  Set first value for visibleRange state on page load / refresh.
-  const initializeVisibleRange = () => {
-    const upToDatemessageHistory = buildLatestMessageChain(
-      currentMessageMap(completeMessageDetail)
-    );
-
-    if (!scrollInitialized.current && upToDatemessageHistory.length > 0) {
-      const newEnd = Math.max(upToDatemessageHistory.length, BUFFER_COUNT);
-      const newStart = Math.max(0, newEnd - BUFFER_COUNT);
-      const newMostVisibleMessageId =
-        upToDatemessageHistory[newEnd - 1]?.messageId;
-
-      updateCurrentVisibleRange(
-        {
-          start: newStart,
-          end: newEnd,
-          mostVisibleMessageId: newMostVisibleMessageId,
-        },
-        true
-      );
-      scrollInitialized.current = true;
-    }
-  };
-
-  const updateVisibleRangeBasedOnScroll = () => {
-    if (!scrollInitialized.current) return;
-    const scrollableDiv = scrollableDivRef.current;
-    if (!scrollableDiv) return;
-
-    const viewportHeight = scrollableDiv.clientHeight;
-    let mostVisibleMessageIndex = -1;
-
-    messageHistory.forEach((message, index) => {
-      const messageElement = document.getElementById(
-        `message-${message.messageId}`
-      );
-      if (messageElement) {
-        const rect = messageElement.getBoundingClientRect();
-        const isVisible = rect.bottom <= viewportHeight && rect.bottom > 0;
-        if (isVisible && index > mostVisibleMessageIndex) {
-          mostVisibleMessageIndex = index;
-        }
-      }
-    });
-
-    if (mostVisibleMessageIndex !== -1) {
-      const startIndex = Math.max(0, mostVisibleMessageIndex - BUFFER_COUNT);
-      const endIndex = Math.min(
-        messageHistory.length,
-        mostVisibleMessageIndex + BUFFER_COUNT + 1
-      );
-
-      updateCurrentVisibleRange({
-        start: startIndex,
-        end: endIndex,
-        mostVisibleMessageId: messageHistory[mostVisibleMessageIndex].messageId,
-      });
-    }
-  };
-
-  useEffect(() => {
-    initializeVisibleRange();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [router, messageHistory]);
-
-  useLayoutEffect(() => {
-    const scrollableDiv = scrollableDivRef.current;
-
-    const handleScroll = () => {
-      updateVisibleRangeBasedOnScroll();
-    };
-
-    scrollableDiv?.addEventListener("scroll", handleScroll);
-
-    return () => {
-      scrollableDiv?.removeEventListener("scroll", handleScroll);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messageHistory]);
 
   const imageFileInMessageHistory = useMemo(() => {
     return messageHistory
@@ -2010,17 +2071,15 @@ export function ChatPage({
       );
   }, [messageHistory]);
 
-  const currentVisibleRange = visibleRange.get(currentSessionId()) || {
-    start: 0,
-    end: 0,
-    mostVisibleMessageId: null,
-  };
   useSendMessageToParent();
 
   useEffect(() => {
     if (liveAssistant) {
       const hasSearchTool = liveAssistant.tools.some(
-        (tool) => tool.in_code_tool_id === SEARCH_TOOL_ID
+        (tool) =>
+          tool.in_code_tool_id === SEARCH_TOOL_ID &&
+          liveAssistant.user_file_ids?.length == 0 &&
+          liveAssistant.user_folder_ids?.length == 0
       );
       setRetrievalEnabled(hasSearchTool);
       if (!hasSearchTool) {
@@ -2032,7 +2091,10 @@ export function ChatPage({
   const [retrievalEnabled, setRetrievalEnabled] = useState(() => {
     if (liveAssistant) {
       return liveAssistant.tools.some(
-        (tool) => tool.in_code_tool_id === SEARCH_TOOL_ID
+        (tool) =>
+          tool.in_code_tool_id === SEARCH_TOOL_ID &&
+          liveAssistant.user_file_ids?.length == 0 &&
+          liveAssistant.user_folder_ids?.length == 0
       );
     }
     return false;
@@ -2050,9 +2112,22 @@ export function ChatPage({
 
   const innerSidebarElementRef = useRef<HTMLDivElement>(null);
   const [settingsToggled, setSettingsToggled] = useState(false);
-  const [showDeleteAllModal, setShowDeleteAllModal] = useState(false);
+
+  const [selectedDocuments, setSelectedDocuments] = useState<OnyxDocument[]>(
+    []
+  );
+  const [selectedDocumentTokens, setSelectedDocumentTokens] = useState(0);
 
   const currentPersona = alternativeAssistant || liveAssistant;
+
+  const HORIZON_DISTANCE = 800;
+  const handleScroll = useCallback(() => {
+    const scrollDistance =
+      endDivRef?.current?.getBoundingClientRect()?.top! -
+      inputRef?.current?.getBoundingClientRect()?.top!;
+    scrollDist.current = scrollDistance;
+    setAboveHorizon(scrollDist.current > HORIZON_DISTANCE);
+  }, []);
 
   useEffect(() => {
     const handleSlackChatRedirect = async () => {
@@ -2092,7 +2167,7 @@ export function ChatPage({
   }, [searchParams, router]);
 
   useEffect(() => {
-    llmOverrideManager.updateImageFilesPresent(imageFileInMessageHistory);
+    llmManager.updateImageFilesPresent(imageFileInMessageHistory);
   }, [imageFileInMessageHistory]);
 
   const pathname = usePathname();
@@ -2119,11 +2194,68 @@ export function ChatPage({
   useEffect(() => {
     abortControllersRef.current = abortControllers;
   }, [abortControllers]);
+  useEffect(() => {
+    const calculateTokensAndUpdateSearchMode = async () => {
+      if (selectedFiles.length > 0 || selectedFolders.length > 0) {
+        try {
+          // Prepare the query parameters for the API call
+          const fileIds = selectedFiles.map((file: FileResponse) => file.id);
+          const folderIds = selectedFolders.map(
+            (folder: FolderResponse) => folder.id
+          );
+
+          // Build the query string
+          const queryParams = new URLSearchParams();
+          fileIds.forEach((id) =>
+            queryParams.append("file_ids", id.toString())
+          );
+          folderIds.forEach((id) =>
+            queryParams.append("folder_ids", id.toString())
+          );
+
+          // Make the API call to get token estimate
+          const response = await fetch(
+            `/api/user/file/token-estimate?${queryParams.toString()}`
+          );
+
+          if (!response.ok) {
+            console.error("Failed to fetch token estimate");
+            return;
+          }
+        } catch (error) {
+          console.error("Error calculating tokens:", error);
+        }
+      }
+    };
+
+    calculateTokensAndUpdateSearchMode();
+  }, [selectedFiles, selectedFolders, llmManager.currentLlm]);
 
   useSidebarShortcut(router, toggleSidebar);
 
   const [sharedChatSession, setSharedChatSession] =
     useState<ChatSession | null>();
+
+  const handleResubmitLastMessage = () => {
+    // Grab the last user-type message
+    const lastUserMsg = messageHistory
+      .slice()
+      .reverse()
+      .find((m) => m.type === "user");
+    if (!lastUserMsg) {
+      setPopup({
+        message: "No previously-submitted user message found.",
+        type: "error",
+      });
+      return;
+    }
+
+    // We call onSubmit, passing a `messageOverride`
+    onSubmit({
+      messageIdToResend: lastUserMsg.messageId,
+      messageOverride: lastUserMsg.message,
+    });
+  };
 
   const showShareModal = (chatSession: ChatSession) => {
     setSharedChatSession(chatSession);
@@ -2146,9 +2278,9 @@ export function ChatPage({
 
   function createRegenerator(regenerationRequest: RegenerationRequest) {
     // Returns new function that only needs `modelOverRide` to be specified when called
-    return async function (modelOverRide: LlmOverride) {
+    return async function (modelOverride: LlmDescriptor) {
       return await onSubmit({
-        modelOverRide,
+        modelOverride,
         messageIdToResend: regenerationRequest.parentMessage.messageId,
         regenerationRequest,
         forceSearch: regenerationRequest.forceSearch,
@@ -2167,6 +2299,20 @@ export function ChatPage({
       </>
     );
 
+  const clearSelectedDocuments = () => {
+    setSelectedDocuments([]);
+    setSelectedDocumentTokens(0);
+    clearSelectedItems();
+  };
+
+  const toggleDocumentSelection = (document: OnyxDocument) => {
+    setSelectedDocuments((prev) =>
+      prev.some((d) => d.document_id === document.document_id)
+        ? prev.filter((d) => d.document_id !== document.document_id)
+        : [...prev, document]
+    );
+  };
+
   return (
     <>
       <HealthCheckBanner />
@@ -2183,32 +2329,6 @@ export function ChatPage({
       {popup}
 
       <ChatPopup />
-
-      {showDeleteAllModal && (
-        <ConfirmEntityModal
-          entityType="All Chats"
-          entityName="all your chat sessions"
-          onClose={() => setShowDeleteAllModal(false)}
-          additionalDetails="This action cannot be undone. All your chat sessions will be deleted."
-          onSubmit={async () => {
-            const response = await deleteAllChatSessions("Chat");
-            if (response.ok) {
-              setShowDeleteAllModal(false);
-              setPopup({
-                message: "All your chat sessions have been deleted.",
-                type: "success",
-              });
-              refreshChatSessions();
-              router.push("/chat");
-            } else {
-              setPopup({
-                message: "Failed to delete all chat sessions.",
-                type: "error",
-              });
-            }
-          }}
-        />
-      )}
 
       {currentFeedback && (
         <FeedbackModal
@@ -2229,9 +2349,7 @@ export function ChatPage({
       {(settingsToggled || userSettingsToggled) && (
         <UserSettingsModal
           setPopup={setPopup}
-          setLlmOverride={(newOverride) =>
-            llmOverrideManager.updateLLMOverride(newOverride)
-          }
+          setCurrentLlm={(newLlm) => llmManager.updateCurrentLlm(newLlm)}
           defaultModel={user?.preferences.default_model!}
           llmProviders={llmProviders}
           onClose={() => {
@@ -2240,6 +2358,23 @@ export function ChatPage({
           }}
         />
       )}
+
+      {toggleDocSelection && (
+        <FilePickerModal
+          setPresentingDocument={setPresentingDocument}
+          buttonContent="Set as Context"
+          isOpen={true}
+          onClose={() => setToggleDocSelection(false)}
+          onSave={() => {
+            setToggleDocSelection(false);
+          }}
+        />
+      )}
+
+      <ChatSearchModal
+        open={isChatSearchModalOpen}
+        onCloseModal={() => setIsChatSearchModalOpen(false)}
+      />
 
       {retrievalEnabled && documentSidebarVisible && settings?.isMobile && (
         <div className="md:hidden">
@@ -2257,6 +2392,7 @@ export function ChatPage({
                   ? true
                   : false
               }
+              humanMessage={humanMessage}
               setPresentingDocument={setPresentingDocument}
               modal={true}
               ref={innerSidebarElementRef}
@@ -2295,7 +2431,7 @@ export function ChatPage({
         <ShareChatSessionModal
           assistantId={liveAssistant?.id}
           message={message}
-          modelOverride={llmOverrideManager.llmOverride}
+          modelOverride={llmManager.currentLlm}
           chatSessionId={sharedChatSession.id}
           existingSharedStatus={sharedChatSession.shared_status}
           onClose={() => setSharedChatSession(null)}
@@ -2313,7 +2449,7 @@ export function ChatPage({
         <ShareChatSessionModal
           message={message}
           assistantId={liveAssistant?.id}
-          modelOverride={llmOverrideManager.llmOverride}
+          modelOverride={llmManager.currentLlm}
           chatSessionId={chatSessionIdRef.current}
           existingSharedStatus={chatSessionSharedStatus}
           onClose={() => setSharingModalVisible(false)}
@@ -2348,10 +2484,13 @@ export function ChatPage({
             >
               <div className="w-full relative">
                 <HistorySidebar
+                  toggleChatSessionSearchModal={() =>
+                    setIsChatSearchModalOpen((open) => !open)
+                  }
                   liveAssistant={liveAssistant}
                   setShowAssistantsModal={setShowAssistantsModal}
                   explicitlyUntoggle={explicitlyUntoggle}
-                  reset={() => setMessage("")}
+                  reset={reset}
                   page="chat"
                   ref={innerSidebarElementRef}
                   toggleSidebar={toggleSidebar}
@@ -2361,9 +2500,9 @@ export function ChatPage({
                   folders={folders}
                   removeToggle={removeToggle}
                   showShareModal={showShareModal}
-                  showDeleteAllModal={() => setShowDeleteAllModal(true)}
                 />
               </div>
+
               <div
                 className={`
                 flex-none
@@ -2409,6 +2548,7 @@ export function ChatPage({
             `}
           >
             <DocumentResults
+              humanMessage={humanMessage}
               agenticMessage={
                 aiMessage?.sub_questions?.length! > 0 ||
                 messageHistory.find(
@@ -2470,7 +2610,12 @@ export function ChatPage({
               {documentSidebarInitialWidth !== undefined && isReady ? (
                 <Dropzone
                   key={currentSessionId()}
-                  onDrop={handleImageUpload}
+                  onDrop={(acceptedFiles) =>
+                    handleImageUpload(
+                      acceptedFiles,
+                      UploadIntent.ATTACH_TO_MESSAGE
+                    )
+                  }
                   noClick
                 >
                   {({ getRootProps }) => (
@@ -2497,6 +2642,7 @@ export function ChatPage({
                         {...getRootProps()}
                       >
                         <div
+                          onScroll={handleScroll}
                           className={`w-full h-[calc(100vh-160px)] flex flex-col default-scrollbar overflow-y-auto overflow-x-hidden relative`}
                           ref={scrollableDivRef}
                         >
@@ -2515,7 +2661,7 @@ export function ChatPage({
                                   h-full
                                   ${sidebarVisible ? "w-[200px]" : "w-[0px]"}
                               `}
-                                ></div>
+                                />
                               )}
                             </div>
                           )}
@@ -2543,6 +2689,7 @@ export function ChatPage({
                             style={{ overflowAnchor: "none" }}
                             key={currentSessionId()}
                             className={
+                              (hasPerformedInitialScroll ? "" : " hidden ") +
                               "desktop:-ml-4 w-full mx-auto " +
                               "absolute mobile:top-0 desktop:top-0 left-0 " +
                               (settings?.enterpriseSettings
@@ -2553,18 +2700,7 @@ export function ChatPage({
                             // NOTE: temporarily removing this to fix the scroll bug
                             // (hasPerformedInitialScroll ? "" : "invisible")
                           >
-                            {(messageHistory.length < BUFFER_COUNT
-                              ? messageHistory
-                              : messageHistory.slice(
-                                  currentVisibleRange.start,
-                                  currentVisibleRange.end
-                                )
-                            ).map((message, fauxIndex) => {
-                              const i =
-                                messageHistory.length < BUFFER_COUNT
-                                  ? fauxIndex
-                                  : fauxIndex + currentVisibleRange.start;
-
+                            {messageHistory.map((message, i) => {
                               const messageMap = currentMessageMap(
                                 completeMessageDetail
                               );
@@ -2601,6 +2737,9 @@ export function ChatPage({
                                     key={messageReactComponentKey}
                                   >
                                     <HumanMessage
+                                      setPresentingDocument={
+                                        setPresentingDocument
+                                      }
                                       disableSwitchingForStreaming={
                                         (nextMessage &&
                                           nextMessage.is_generating) ||
@@ -2693,6 +2832,23 @@ export function ChatPage({
                                     ? messageHistory[i + 1]?.documents
                                     : undefined;
 
+                                const nextMessage =
+                                  messageHistory[i + 1]?.type === "assistant"
+                                    ? messageHistory[i + 1]
+                                    : undefined;
+
+                                const attachedFileDescriptors =
+                                  previousMessage?.files.filter(
+                                    (file) =>
+                                      file.type == ChatFileType.USER_KNOWLEDGE
+                                  );
+                                const userFiles = allUserFiles?.filter((file) =>
+                                  attachedFileDescriptors?.some(
+                                    (descriptor) =>
+                                      descriptor.id === file.file_id
+                                  )
+                                );
+
                                 return (
                                   <div
                                     className="text-text"
@@ -2704,9 +2860,9 @@ export function ChatPage({
                                         : null
                                     }
                                   >
-                                    {message.sub_questions &&
-                                    message.sub_questions.length > 0 ? (
+                                    {message.is_agentic ? (
                                       <AgenticMessage
+                                        resubmit={handleResubmitLastMessage}
                                         error={uncaughtError}
                                         isStreamingQuestions={
                                           message.isStreamingQuestions ?? false
@@ -2721,7 +2877,10 @@ export function ChatPage({
                                             selectedMessageForDocDisplay ==
                                               secondLevelMessage?.messageId)
                                         }
-                                        isImprovement={message.isImprovement}
+                                        isImprovement={
+                                          message.isImprovement ||
+                                          nextMessage?.isImprovement
+                                        }
                                         secondLevelGenerating={
                                           (message.second_level_generating &&
                                             currentSessionChatState !==
@@ -2878,6 +3037,7 @@ export function ChatPage({
                                       />
                                     ) : (
                                       <AIMessage
+                                        userKnowledgeFiles={userFiles}
                                         docs={
                                           message?.documents &&
                                           message?.documents.length > 0
@@ -3021,7 +3181,7 @@ export function ChatPage({
                                               messageId: message.messageId,
                                               parentMessage: parentMessage!,
                                               forceSearch: true,
-                                            })(llmOverrideManager.llmOverride);
+                                            })(llmManager.currentLlm);
                                           } else {
                                             setPopup({
                                               type: "error",
@@ -3051,21 +3211,18 @@ export function ChatPage({
                                       currentPersona={liveAssistant}
                                       messageId={message.messageId}
                                       content={
-                                        <p className="text-red-700 text-sm my-auto">
-                                          {message.message}
-                                          {message.stackTrace && (
-                                            <span
-                                              onClick={() =>
-                                                setStackTraceModalContent(
-                                                  message.stackTrace!
-                                                )
-                                              }
-                                              className="ml-2 cursor-pointer underline"
-                                            >
-                                              Show stack trace.
-                                            </span>
-                                          )}
-                                        </p>
+                                        <ErrorBanner
+                                          resubmit={handleResubmitLastMessage}
+                                          error={message.message}
+                                          showStackTrace={
+                                            message.stackTrace
+                                              ? () =>
+                                                  setStackTraceModalContent(
+                                                    message.stackTrace!
+                                                  )
+                                              : undefined
+                                          }
+                                        />
                                       }
                                     />
                                   </div>
@@ -3079,6 +3236,7 @@ export function ChatPage({
                                 messageHistory[messageHistory.length - 1]
                                   ?.type != "user")) && (
                               <HumanMessage
+                                setPresentingDocument={setPresentingDocument}
                                 key={-2}
                                 messageId={-1}
                                 content={submittedMessage}
@@ -3166,26 +3324,28 @@ export function ChatPage({
                               availableDocumentSets={documentSets}
                               availableTags={tags}
                               filterManager={filterManager}
-                              llmOverrideManager={llmOverrideManager}
+                              llmManager={llmManager}
                               removeDocs={() => {
                                 clearSelectedDocuments();
                               }}
                               retrievalEnabled={retrievalEnabled}
+                              toggleDocSelection={() =>
+                                setToggleDocSelection(true)
+                              }
                               showConfigureAPIKey={() =>
                                 setShowApiKeyModal(true)
                               }
-                              chatState={currentSessionChatState}
-                              stopGenerating={stopGenerating}
                               selectedDocuments={selectedDocuments}
-                              // assistant stuff
-                              selectedAssistant={liveAssistant}
-                              setAlternativeAssistant={setAlternativeAssistant}
-                              alternativeAssistant={alternativeAssistant}
-                              // end assistant stuff
                               message={message}
                               setMessage={setMessage}
+                              stopGenerating={stopGenerating}
                               onSubmit={onSubmit}
-                              files={currentMessageFiles}
+                              chatState={currentSessionChatState}
+                              alternativeAssistant={alternativeAssistant}
+                              selectedAssistant={
+                                selectedAssistant || liveAssistant
+                              }
+                              setAlternativeAssistant={setAlternativeAssistant}
                               setFiles={setCurrentMessageFiles}
                               handleFileUpload={handleImageUpload}
                               textAreaRef={textAreaRef}
@@ -3233,7 +3393,7 @@ export function ChatPage({
                               : "w-[0px]"
                           }
                       `}
-                      ></div>
+                      />
                     </div>
                   )}
                 </Dropzone>
@@ -3257,7 +3417,6 @@ export function ChatPage({
           </div>
           <FixedLogo backgroundToggled={sidebarVisible || showHistorySidebar} />
         </div>
-        {/* Right Sidebar - DocumentSidebar */}
       </div>
     </>
   );

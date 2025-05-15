@@ -1,5 +1,5 @@
 import { chromium, FullConfig } from "@playwright/test";
-import { loginAs } from "./utils/auth";
+import { inviteAdmin2AsAdmin1, loginAs } from "./utils/auth";
 
 async function globalSetup(config: FullConfig) {
   const browser = await chromium.launch();
@@ -16,6 +16,11 @@ async function globalSetup(config: FullConfig) {
   await userContext.storageState({ path: "user_auth.json" });
   await userContext.close();
 
+  const admin2Context = await browser.newContext();
+  const admin2Page = await admin2Context.newPage();
+  await loginAs(admin2Page, "admin2");
+  await admin2Context.storageState({ path: "admin2_auth.json" });
+  await admin2Context.close();
   await browser.close();
 }
 

@@ -61,13 +61,9 @@ const useAssistantFilter = () => {
 
 interface AssistantModalProps {
   hideModal: () => void;
-  modalHeight?: string;
 }
 
-export function AssistantModal({
-  hideModal,
-  modalHeight,
-}: AssistantModalProps) {
+export function AssistantModal({ hideModal }: AssistantModalProps) {
   const { assistants, pinnedAssistants } = useAssistants();
   const { assistantFilters, toggleAssistantFilter } = useAssistantFilter();
   const router = useRouter();
@@ -121,7 +117,25 @@ export function AssistantModal({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="p-0 max-w-4xl  overflow-hidden max-h-[80vh]  w-[95%] bg-background rounded-md shadow-2xl transform transition-all duration-300 ease-in-out relative w-11/12 max-w-4xl pt-10 pb-10 px-10 overflow-hidden flex flex-col"
+        className="p-0
+          max-w-4xl
+          overflow-hidden
+          max-h-[80vh]
+          w-[95%]
+          bg-background
+          rounded-md
+          shadow-2xl
+          transform
+          transition-all
+          duration-300
+          ease-in-out
+          relative
+          w-11/12
+          pt-10
+          pb-10
+          px-10
+          flex
+          flex-col"
         style={{
           position: "fixed",
           top: "10vh",
@@ -129,6 +143,7 @@ export function AssistantModal({
           transform: "translateX(-50%)",
           margin: 0,
         }}
+        aria-label="Assistant Modal"
       >
         <div className="absolute top-2 right-2">
           <button

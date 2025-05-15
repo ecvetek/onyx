@@ -1,5 +1,4 @@
 import * as Yup from "yup";
-import { IsPublicGroupSelectorFormType } from "@/components/IsPublicGroupSelector";
 import { ConfigurableSources, ValidInputTypes, ValidSources } from "../types";
 import { AccessTypeGroupSelectorFormType } from "@/components/admin/connectors/AccessTypeGroupSelector";
 import { Credential } from "@/lib/connectors/credentials"; // Import Credential type
@@ -43,6 +42,7 @@ export interface Option {
     currentCredential: Credential<any> | null
   ) => boolean;
   wrapInCollapsible?: boolean;
+  disabled?: boolean | ((currentCredential: Credential<any> | null) => boolean);
 }
 
 export interface SelectOption extends Option {
@@ -60,6 +60,7 @@ export interface ListOption extends Option {
 export interface TextOption extends Option {
   type: "text";
   default?: string;
+  initial?: string | ((currentCredential: Credential<any> | null) => string);
   isTextArea?: boolean;
 }
 
@@ -105,6 +106,7 @@ export interface TabOption extends Option {
 export interface ConnectionConfiguration {
   description: string;
   subtext?: string;
+  initialConnectorName?: string; // a key in the credential to prepopulate the connector name field
   values: (
     | BooleanOption
     | ListOption
@@ -124,6 +126,10 @@ export interface ConnectionConfiguration {
     | TabOption
   )[];
   overrideDefaultFreq?: number;
+  advancedValuesVisibleCondition?: (
+    values: any,
+    currentCredential: Credential<any> | null
+  ) => boolean;
 }
 
 export const connectorConfigs: Record<
@@ -152,7 +158,17 @@ export const connectorConfigs: Record<
         ],
       },
     ],
-    advanced_values: [],
+    advanced_values: [
+      {
+        type: "checkbox",
+        query: "Scroll before scraping:",
+        label: "Scroll before scraping",
+        description:
+          "Enable if the website requires scrolling for the desired content to load",
+        name: "scroll_before_scraping",
+        optional: true,
+      },
+    ],
     overrideDefaultFreq: 60 * 60 * 24,
   },
   github: {
@@ -160,32 +176,61 @@ export const connectorConfigs: Record<
     values: [
       {
         type: "text",
-        query: "Enter the repository owner:",
+        query: "Enter the GitHub username or organization:",
         label: "Repository Owner",
         name: "repo_owner",
         optional: false,
       },
       {
-        type: "text",
-        query: "Enter the repository name:",
-        label: "Repository Name",
-        name: "repo_name",
-        optional: false,
+        type: "tab",
+        name: "github_mode",
+        label: "What should we index from GitHub?",
+        optional: true,
+        tabs: [
+          {
+            value: "repo",
+            label: "Specific Repository",
+            fields: [
+              {
+                type: "text",
+                query: "Enter the repository name(s):",
+                label: "Repository Name(s)",
+                name: "repositories",
+                optional: false,
+                description:
+                  "For multiple repositories, enter comma-separated names (e.g., repo1,repo2,repo3)",
+              },
+            ],
+          },
+          {
+            value: "everything",
+            label: "Everything",
+            fields: [
+              {
+                type: "string_tab",
+                label: "Everything",
+                name: "everything",
+                description:
+                  "This connector will index all repositories the provided credentials have access to!",
+              },
+            ],
+          },
+        ],
       },
       {
         type: "checkbox",
         query: "Include pull requests?",
         label: "Include pull requests?",
-        description: "Index pull requests from this repository",
+        description: "Index pull requests from repositories",
         name: "include_prs",
         optional: true,
       },
       {
         type: "checkbox",
         query: "Include issues?",
-        label: "Include Issues",
+        label: "Include Issues?",
         name: "include_issues",
-        description: "Index issues from this repository",
+        description: "Index issues from repositories",
         optional: true,
       },
     ],
@@ -208,24 +253,25 @@ export const connectorConfigs: Record<
         name: "project_name",
         optional: false,
       },
+    ],
+    advanced_values: [
       {
         type: "checkbox",
         query: "Include merge requests?",
         label: "Include MRs",
         name: "include_mrs",
+        description: "Index merge requests from repositories",
         default: true,
-        hidden: true,
       },
       {
         type: "checkbox",
         query: "Include issues?",
         label: "Include Issues",
         name: "include_issues",
-        optional: true,
-        hidden: true,
+        description: "Index issues from repositories",
+        default: true,
       },
     ],
-    advanced_values: [],
   },
   gitbook: {
     description: "Configure GitBook connector",
@@ -338,7 +384,20 @@ export const connectorConfigs: Record<
         defaultTab: "space",
       },
     ],
-    advanced_values: [],
+    advanced_values: [
+      {
+        type: "text",
+        description:
+          "Enter a comma separated list of specific user emails to index. This will only index files accessible to these users.",
+        label: "Specific User Emails",
+        name: "specific_user_emails",
+        optional: true,
+        default: "",
+        isTextArea: true,
+      },
+    ],
+    advancedValuesVisibleCondition: (values, currentCredential) =>
+      !currentCredential?.credential_json?.google_tokens,
   },
   gmail: {
     description: "Configure Gmail connector",
@@ -352,6 +411,7 @@ export const connectorConfigs: Record<
   },
   confluence: {
     description: "Configure Confluence connector",
+    initialConnectorName: "cloud_name",
     values: [
       {
         type: "checkbox",
@@ -362,6 +422,12 @@ export const connectorConfigs: Record<
         default: true,
         description:
           "Check if this is a Confluence Cloud instance, uncheck for Confluence Server/Data Center",
+        disabled: (currentCredential) => {
+          if (currentCredential?.credential_json?.confluence_refresh_token) {
+            return true;
+          }
+          return false;
+        },
       },
       {
         type: "text",
@@ -369,6 +435,15 @@ export const connectorConfigs: Record<
         label: "Wiki Base URL",
         name: "wiki_base",
         optional: false,
+        initial: (currentCredential) => {
+          return currentCredential?.credential_json?.wiki_base ?? "";
+        },
+        disabled: (currentCredential) => {
+          if (currentCredential?.credential_json?.confluence_refresh_token) {
+            return true;
+          }
+          return false;
+        },
         description:
           "The base URL of your Confluence instance (e.g., https://your-domain.atlassian.net/wiki)",
       },
@@ -452,14 +527,52 @@ export const connectorConfigs: Record<
   },
   jira: {
     description: "Configure Jira connector",
-    subtext: `Specify any link to a Jira page below and click "Index" to Index. Based on the provided link, we will index the ENTIRE PROJECT, not just the specified page. For example, entering https://onyx.atlassian.net/jira/software/projects/DAN/boards/1 and clicking the Index button will index the whole DAN Jira project.`,
+    subtext: `Configure which Jira content to index. You can index everything or specify a particular project.`,
     values: [
       {
         type: "text",
-        query: "Enter the Jira project URL:",
-        label: "Jira Project URL",
-        name: "jira_project_url",
+        query: "Enter the Jira base URL:",
+        label: "Jira Base URL",
+        name: "jira_base_url",
         optional: false,
+        description:
+          "The base URL of your Jira instance (e.g., https://your-domain.atlassian.net)",
+      },
+      {
+        type: "tab",
+        name: "indexing_scope",
+        label: "How Should We Index Your Jira?",
+        optional: true,
+        tabs: [
+          {
+            value: "everything",
+            label: "Everything",
+            fields: [
+              {
+                type: "string_tab",
+                label: "Everything",
+                name: "everything",
+                description:
+                  "This connector will index all issues the provided credentials have access to!",
+              },
+            ],
+          },
+          {
+            value: "project",
+            label: "Project",
+            fields: [
+              {
+                type: "text",
+                query: "Enter the project key:",
+                label: "Project Key",
+                name: "project_key",
+                description:
+                  "The key of a specific project to index (e.g., 'PROJ').",
+              },
+            ],
+          },
+        ],
+        defaultTab: "everything",
       },
       {
         type: "list",
@@ -1153,9 +1266,51 @@ For example, specifying .*-support.* as a "channel" will cause the connector to 
     ],
     overrideDefaultFreq: 60 * 60 * 24,
   },
+  highspot: {
+    description: "Configure Highspot connector",
+    values: [
+      {
+        type: "tab",
+        name: "highspot_scope",
+        label: "What should we index from Highspot?",
+        optional: true,
+        tabs: [
+          {
+            value: "spots",
+            label: "Specific Spots",
+            fields: [
+              {
+                type: "list",
+                query: "Enter the spot name(s):",
+                label: "Spot Name(s)",
+                name: "spot_names",
+                optional: false,
+                description: "For multiple spots, enter your spot one by one.",
+              },
+            ],
+          },
+          {
+            value: "everything",
+            label: "Everything",
+            fields: [
+              {
+                type: "string_tab",
+                label: "Everything",
+                name: "everything",
+                description:
+                  "This connector will index all spots the provided credentials have access to!",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    advanced_values: [],
+  },
 };
 export function createConnectorInitialValues(
-  connector: ConfigurableSources
+  connector: ConfigurableSources,
+  currentCredential: Credential<any> | null = null
 ): Record<string, any> & AccessTypeGroupSelectorFormType {
   const configuration = connectorConfigs[connector];
 
@@ -1170,7 +1325,16 @@ export function createConnectorInitialValues(
         } else if (field.type === "list") {
           acc[field.name] = field.default || [];
         } else if (field.type === "checkbox") {
-          acc[field.name] = field.default || false;
+          // Special case for include_files_shared_with_me when using service account
+          if (
+            field.name === "include_files_shared_with_me" &&
+            currentCredential &&
+            !currentCredential.credential_json?.google_tokens
+          ) {
+            acc[field.name] = true;
+          } else {
+            acc[field.name] = field.default || false;
+          }
         } else if (field.default !== undefined) {
           acc[field.name] = field.default;
         }
@@ -1186,10 +1350,10 @@ export function createConnectorValidationSchema(
 ): Yup.ObjectSchema<Record<string, any>> {
   const configuration = connectorConfigs[connector];
 
-  return Yup.object().shape({
+  const object = Yup.object().shape({
     access_type: Yup.string().required("Access Type is required"),
     name: Yup.string().required("Connector Name is required"),
-    ...configuration.values.reduce(
+    ...[...configuration.values, ...configuration.advanced_values].reduce(
       (acc, field) => {
         let schema: any =
           field.type === "select"
@@ -1216,6 +1380,8 @@ export function createConnectorValidationSchema(
     pruneFreq: Yup.number().min(0, "Prune frequency must be non-negative"),
     refreshFreq: Yup.number().min(0, "Refresh frequency must be non-negative"),
   });
+
+  return object;
 }
 
 export const defaultPruneFreqDays = 30; // 30 days
@@ -1264,7 +1430,7 @@ export interface WebConfig {
 
 export interface GithubConfig {
   repo_owner: string;
-  repo_name: string;
+  repositories: string; // Comma-separated list of repository names
   include_prs: boolean;
   include_issues: boolean;
 }
@@ -1299,6 +1465,7 @@ export interface ConfluenceConfig {
 
 export interface JiraConfig {
   jira_project_url: string;
+  project_key?: string;
   comment_email_blacklist?: string[];
 }
 
@@ -1351,6 +1518,7 @@ export interface LoopioConfig {
 
 export interface FileConfig {
   file_locations: string[];
+  zip_metadata: Record<string, any>;
 }
 
 export interface ZulipConfig {

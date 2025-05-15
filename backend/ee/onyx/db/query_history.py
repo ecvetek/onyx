@@ -15,10 +15,13 @@ from sqlalchemy.sql import select
 from sqlalchemy.sql.expression import literal
 from sqlalchemy.sql.expression import UnaryExpression
 
+from ee.onyx.background.task_name_builders import QUERY_HISTORY_TASK_NAME_PREFIX
 from onyx.configs.constants import QAFeedbackType
 from onyx.db.models import ChatMessage
 from onyx.db.models import ChatMessageFeedback
 from onyx.db.models import ChatSession
+from onyx.db.models import TaskQueueState
+from onyx.db.tasks import get_all_tasks_with_prefix
 
 
 def _build_filter_conditions(
@@ -134,7 +137,9 @@ def fetch_chat_sessions_eagerly_by_time(
     limit: int | None = 500,
     initial_time: datetime | None = None,
 ) -> list[ChatSession]:
-    time_order: UnaryExpression = desc(ChatSession.time_created)
+    """Sorted by oldest to newest, then by message id"""
+
+    asc_time_order: UnaryExpression = asc(ChatSession.time_created)
     message_order: UnaryExpression = asc(ChatMessage.id)
 
     filters: list[ColumnElement | BinaryExpression] = [
@@ -147,8 +152,7 @@ def fetch_chat_sessions_eagerly_by_time(
     subquery = (
         db_session.query(ChatSession.id, ChatSession.time_created)
         .filter(*filters)
-        .order_by(ChatSession.id, time_order)
-        .distinct(ChatSession.id)
+        .order_by(asc_time_order)
         .limit(limit)
         .subquery()
     )
@@ -164,9 +168,15 @@ def fetch_chat_sessions_eagerly_by_time(
                 ChatMessage.chat_message_feedbacks
             ),
         )
-        .order_by(time_order, message_order)
+        .order_by(asc_time_order, message_order)
     )
 
     chat_sessions = query.all()
 
     return chat_sessions
+
+
+def get_all_query_history_export_tasks(
+    db_session: Session,
+) -> list[TaskQueueState]:
+    return get_all_tasks_with_prefix(db_session, QUERY_HISTORY_TASK_NAME_PREFIX)

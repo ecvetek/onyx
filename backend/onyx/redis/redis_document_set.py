@@ -23,7 +23,7 @@ class RedisDocumentSet(RedisObjectHelper):
     FENCE_PREFIX = PREFIX + "_fence"
     TASKSET_PREFIX = PREFIX + "_taskset"
 
-    def __init__(self, tenant_id: str | None, id: int) -> None:
+    def __init__(self, tenant_id: str, id: int) -> None:
         super().__init__(tenant_id, str(id))
 
     @property
@@ -58,7 +58,7 @@ class RedisDocumentSet(RedisObjectHelper):
         db_session: Session,
         redis_client: Redis,
         lock: RedisLock,
-        tenant_id: str | None,
+        tenant_id: str,
     ) -> tuple[int, int] | None:
         """Max tasks is ignored for now until we can build the logic to mark the
         document set up to date over multiple batches.
@@ -91,7 +91,7 @@ class RedisDocumentSet(RedisObjectHelper):
                 kwargs=dict(document_id=doc_id, tenant_id=tenant_id),
                 queue=OnyxCeleryQueues.VESPA_METADATA_SYNC,
                 task_id=custom_task_id,
-                priority=OnyxCeleryPriority.LOW,
+                priority=OnyxCeleryPriority.MEDIUM,
             )
 
             num_tasks_sent += 1

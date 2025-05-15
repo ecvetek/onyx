@@ -18,6 +18,12 @@ class IndexingStatus(str, PyEnum):
         }
         return self in terminal_states
 
+    def is_successful(self) -> bool:
+        return (
+            self == IndexingStatus.SUCCESS
+            or self == IndexingStatus.COMPLETED_WITH_ERRORS
+        )
+
 
 class IndexingMode(str, PyEnum):
     UPDATE = "update"
@@ -63,6 +69,9 @@ class IndexModelStatus(str, PyEnum):
     PRESENT = "PRESENT"
     FUTURE = "FUTURE"
 
+    def is_current(self) -> bool:
+        return self == IndexModelStatus.PRESENT
+
 
 class ChatSessionSharedStatus(str, PyEnum):
     PUBLIC = "public"
@@ -70,15 +79,30 @@ class ChatSessionSharedStatus(str, PyEnum):
 
 
 class ConnectorCredentialPairStatus(str, PyEnum):
+    SCHEDULED = "SCHEDULED"
+    INITIAL_INDEXING = "INITIAL_INDEXING"
     ACTIVE = "ACTIVE"
     PAUSED = "PAUSED"
     DELETING = "DELETING"
+    INVALID = "INVALID"
 
     def is_active(self) -> bool:
-        return self == ConnectorCredentialPairStatus.ACTIVE
+        return (
+            self == ConnectorCredentialPairStatus.ACTIVE
+            or self == ConnectorCredentialPairStatus.SCHEDULED
+            or self == ConnectorCredentialPairStatus.INITIAL_INDEXING
+        )
 
 
 class AccessType(str, PyEnum):
     PUBLIC = "public"
     PRIVATE = "private"
     SYNC = "sync"
+
+
+class EmbeddingPrecision(str, PyEnum):
+    # matches vespa tensor type
+    # only support float / bfloat16 for now, since there's not a
+    # good reason to specify anything else
+    BFLOAT16 = "bfloat16"
+    FLOAT = "float"

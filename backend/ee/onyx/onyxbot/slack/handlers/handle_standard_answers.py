@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 
 from ee.onyx.db.standard_answer import fetch_standard_answer_categories_by_names
 from ee.onyx.db.standard_answer import find_matching_standard_answers
-from ee.onyx.server.manage.models import StandardAnswer as PydanticStandardAnswer
 from onyx.configs.constants import MessageType
 from onyx.configs.onyxbot_configs import DANSWER_REACT_EMOJI
 from onyx.db.chat import create_chat_session
@@ -22,8 +21,9 @@ from onyx.onyxbot.slack.blocks import get_restate_blocks
 from onyx.onyxbot.slack.constants import GENERATE_ANSWER_BUTTON_ACTION_ID
 from onyx.onyxbot.slack.handlers.utils import send_team_member_message
 from onyx.onyxbot.slack.models import SlackMessageInfo
-from onyx.onyxbot.slack.utils import respond_in_thread
+from onyx.onyxbot.slack.utils import respond_in_thread_or_channel
 from onyx.onyxbot.slack.utils import update_emote_react
+from onyx.server.manage.models import StandardAnswer as PydanticStandardAnswer
 from onyx.utils.logger import OnyxLoggingAdapter
 from onyx.utils.logger import setup_logger
 
@@ -216,7 +216,7 @@ def _handle_standard_answers(
         all_blocks = restate_question_blocks + answer_blocks
 
         try:
-            respond_in_thread(
+            respond_in_thread_or_channel(
                 client=client,
                 channel=message_info.channel_to_respond,
                 receiver_ids=receiver_ids,
@@ -231,6 +231,7 @@ def _handle_standard_answers(
                     client=client,
                     channel=message_info.channel_to_respond,
                     thread_ts=slack_thread_id,
+                    receiver_ids=receiver_ids,
                 )
 
             return True

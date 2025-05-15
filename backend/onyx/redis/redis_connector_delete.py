@@ -16,8 +16,7 @@ from onyx.configs.constants import OnyxCeleryQueues
 from onyx.configs.constants import OnyxCeleryTask
 from onyx.configs.constants import OnyxRedisConstants
 from onyx.db.connector_credential_pair import get_connector_credential_pair_from_id
-from onyx.db.document import construct_document_select_for_connector_credential_pair
-from onyx.db.models import Document as DbDocument
+from onyx.db.document import construct_document_id_select_for_connector_credential_pair
 
 
 class RedisConnectorDeletePayload(BaseModel):
@@ -33,13 +32,21 @@ class RedisConnectorDelete:
     FENCE_PREFIX = f"{PREFIX}_fence"  # "connectordeletion_fence"
     TASKSET_PREFIX = f"{PREFIX}_taskset"  # "connectordeletion_taskset"
 
-    def __init__(self, tenant_id: str | None, id: int, redis: redis.Redis) -> None:
-        self.tenant_id: str | None = tenant_id
+    # used to signal the overall workflow is still active
+    # it's impossible to get the exact state of the system at a single point in time
+    # so we need a signal with a TTL to bridge gaps in our checks
+    ACTIVE_PREFIX = PREFIX + "_active"
+    ACTIVE_TTL = 3600
+
+    def __init__(self, tenant_id: str, id: int, redis: redis.Redis) -> None:
+        self.tenant_id: str = tenant_id
         self.id = id
         self.redis = redis
 
         self.fence_key: str = f"{self.FENCE_PREFIX}_{id}"
         self.taskset_key = f"{self.TASKSET_PREFIX}_{id}"
+
+        self.active_key = f"{self.ACTIVE_PREFIX}_{id}"
 
     def taskset_clear(self) -> None:
         self.redis.delete(self.taskset_key)
@@ -77,6 +84,20 @@ class RedisConnectorDelete:
         self.redis.set(self.fence_key, payload.model_dump_json())
         self.redis.sadd(OnyxRedisConstants.ACTIVE_FENCES, self.fence_key)
 
+    def set_active(self) -> None:
+        """This sets a signal to keep the permissioning flow from getting cleaned up within
+        the expiration time.
+
+        The slack in timing is needed to avoid race conditions where simply checking
+        the celery queue and task status could result in race conditions."""
+        self.redis.set(self.active_key, 0, ex=self.ACTIVE_TTL)
+
+    def active(self) -> bool:
+        if self.redis.exists(self.active_key):
+            return True
+
+        return False
+
     def _generate_task_id(self) -> str:
         # celery's default task id format is "dd32ded3-00aa-4884-8b21-42f8332e7fac"
         # we prefix the task id so it's easier to keep track of who created the task
@@ -94,7 +115,6 @@ class RedisConnectorDelete:
         Otherwise, returns an int with the number of generated tasks."""
         last_lock_time = time.monotonic()
 
-        async_results = []
         cc_pair = get_connector_credential_pair_from_id(
             db_session=db_session,
             cc_pair_id=int(self.id),
@@ -102,11 +122,13 @@ class RedisConnectorDelete:
         if not cc_pair:
             return None
 
-        stmt = construct_document_select_for_connector_credential_pair(
+        num_tasks_sent = 0
+
+        stmt = construct_document_id_select_for_connector_credential_pair(
             cc_pair.connector_id, cc_pair.credential_id
         )
-        for doc_temp in db_session.scalars(stmt).yield_per(DB_YIELD_PER_DEFAULT):
-            doc: DbDocument = doc_temp
+        for doc_id in db_session.scalars(stmt).yield_per(DB_YIELD_PER_DEFAULT):
+            doc_id = cast(str, doc_id)
             current_time = time.monotonic()
             if current_time - last_lock_time >= (
                 CELERY_VESPA_SYNC_BEAT_LOCK_TIMEOUT / 4
@@ -121,10 +143,10 @@ class RedisConnectorDelete:
             self.redis.sadd(self.taskset_key, custom_task_id)
 
             # Priority on sync's triggered by new indexing should be medium
-            result = celery_app.send_task(
+            celery_app.send_task(
                 OnyxCeleryTask.DOCUMENT_BY_CC_PAIR_CLEANUP_TASK,
                 kwargs=dict(
-                    document_id=doc.id,
+                    document_id=doc_id,
                     connector_id=cc_pair.connector_id,
                     credential_id=cc_pair.credential_id,
                     tenant_id=self.tenant_id,
@@ -135,12 +157,13 @@ class RedisConnectorDelete:
                 ignore_result=True,
             )
 
-            async_results.append(result)
+            num_tasks_sent += 1
 
-        return len(async_results)
+        return num_tasks_sent
 
     def reset(self) -> None:
         self.redis.srem(OnyxRedisConstants.ACTIVE_FENCES, self.fence_key)
+        self.redis.delete(self.active_key)
         self.redis.delete(self.taskset_key)
         self.redis.delete(self.fence_key)
 
@@ -153,6 +176,9 @@ class RedisConnectorDelete:
     @staticmethod
     def reset_all(r: redis.Redis) -> None:
         """Deletes all redis values for all connectors"""
+        for key in r.scan_iter(RedisConnectorDelete.ACTIVE_PREFIX + "*"):
+            r.delete(key)
+
         for key in r.scan_iter(RedisConnectorDelete.TASKSET_PREFIX + "*"):
             r.delete(key)
 

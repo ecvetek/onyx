@@ -1,54 +1,65 @@
+import copy
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from typing import Any
 from urllib.parse import quote
 
+from requests.exceptions import HTTPError
+from typing_extensions import override
+
 from onyx.configs.app_configs import CONFLUENCE_CONNECTOR_LABELS_TO_SKIP
 from onyx.configs.app_configs import CONFLUENCE_TIMEZONE_OFFSET
 from onyx.configs.app_configs import CONTINUE_ON_CONNECTOR_FAILURE
 from onyx.configs.app_configs import INDEX_BATCH_SIZE
 from onyx.configs.constants import DocumentSource
-from onyx.connectors.confluence.onyx_confluence import build_confluence_client
+from onyx.connectors.confluence.onyx_confluence import extract_text_from_confluence_html
 from onyx.connectors.confluence.onyx_confluence import OnyxConfluence
-from onyx.connectors.confluence.utils import attachment_to_content
 from onyx.connectors.confluence.utils import build_confluence_document_id
+from onyx.connectors.confluence.utils import convert_attachment_to_content
 from onyx.connectors.confluence.utils import datetime_from_string
-from onyx.connectors.confluence.utils import extract_text_from_confluence_html
+from onyx.connectors.confluence.utils import process_attachment
+from onyx.connectors.confluence.utils import update_param_in_path
 from onyx.connectors.confluence.utils import validate_attachment_filetype
-from onyx.connectors.interfaces import GenerateDocumentsOutput
+from onyx.connectors.exceptions import ConnectorValidationError
+from onyx.connectors.exceptions import CredentialExpiredError
+from onyx.connectors.exceptions import InsufficientPermissionsError
+from onyx.connectors.exceptions import UnexpectedValidationError
+from onyx.connectors.interfaces import CheckpointedConnector
+from onyx.connectors.interfaces import CheckpointOutput
+from onyx.connectors.interfaces import ConnectorCheckpoint
+from onyx.connectors.interfaces import ConnectorFailure
+from onyx.connectors.interfaces import CredentialsConnector
+from onyx.connectors.interfaces import CredentialsProviderInterface
 from onyx.connectors.interfaces import GenerateSlimDocumentOutput
-from onyx.connectors.interfaces import LoadConnector
-from onyx.connectors.interfaces import PollConnector
 from onyx.connectors.interfaces import SecondsSinceUnixEpoch
 from onyx.connectors.interfaces import SlimConnector
 from onyx.connectors.models import BasicExpertInfo
 from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
-from onyx.connectors.models import Section
+from onyx.connectors.models import DocumentFailure
+from onyx.connectors.models import ImageSection
 from onyx.connectors.models import SlimDocument
+from onyx.connectors.models import TextSection
 from onyx.indexing.indexing_heartbeat import IndexingHeartbeatInterface
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
-
 # Potential Improvements
-# 1. Include attachments, etc
-# 2. Segment into Sections for more accurate linking, can split by headers but make sure no text/ordering is lost
-
+# 1. Segment into Sections for more accurate linking, can split by headers but make sure no text/ordering is lost
 _COMMENT_EXPANSION_FIELDS = ["body.storage.value"]
 _PAGE_EXPANSION_FIELDS = [
     "body.storage.value",
     "version",
     "space",
     "metadata.labels",
+    "history.lastUpdated",
 ]
 _ATTACHMENT_EXPANSION_FIELDS = [
     "version",
     "space",
     "metadata.labels",
 ]
-
 _RESTRICTIONS_EXPANSION_FIELDS = [
     "space",
     "restrictions.read.restrictions.user",
@@ -59,25 +70,26 @@ _RESTRICTIONS_EXPANSION_FIELDS = [
 
 _SLIM_DOC_BATCH_SIZE = 5000
 
-_ATTACHMENT_EXTENSIONS_TO_FILTER_OUT = [
-    "png",
-    "jpg",
-    "jpeg",
-    "gif",
-    "mp4",
-    "mov",
-    "mp3",
-    "wav",
-]
-_FULL_EXTENSION_FILTER_STRING = "".join(
-    [
-        f" and title!~'*.{extension}'"
-        for extension in _ATTACHMENT_EXTENSIONS_TO_FILTER_OUT
-    ]
-)
+ONE_HOUR = 3600
+ONE_DAY = ONE_HOUR * 24
+
+MAX_CACHED_IDS = 100
 
 
-class ConfluenceConnector(LoadConnector, PollConnector, SlimConnector):
+def _should_propagate_error(e: Exception) -> bool:
+    return "field 'updated' is invalid" in str(e)
+
+
+class ConfluenceCheckpoint(ConnectorCheckpoint):
+
+    next_page_url: str | None
+
+
+class ConfluenceConnector(
+    CheckpointedConnector[ConfluenceCheckpoint],
+    SlimConnector,
+    CredentialsConnector,
+):
     def __init__(
         self,
         wiki_base: str,
@@ -94,14 +106,22 @@ class ConfluenceConnector(LoadConnector, PollConnector, SlimConnector):
         labels_to_skip: list[str] = CONFLUENCE_CONNECTOR_LABELS_TO_SKIP,
         timezone_offset: float = CONFLUENCE_TIMEZONE_OFFSET,
     ) -> None:
-        self.batch_size = batch_size
-        self.continue_on_failure = continue_on_failure
-        self._confluence_client: OnyxConfluence | None = None
+        self.wiki_base = wiki_base
         self.is_cloud = is_cloud
+        self.space = space
+        self.page_id = page_id
+        self.index_recursively = index_recursively
+        self.cql_query = cql_query
+        self.batch_size = batch_size
+        self.labels_to_skip = labels_to_skip
+        self.timezone_offset = timezone_offset
+        self._confluence_client: OnyxConfluence | None = None
+        self._low_timeout_confluence_client: OnyxConfluence | None = None
+        self._fetched_titles: set[str] = set()
+        self.allow_images = False
 
         # Remove trailing slash from wiki_base if present
         self.wiki_base = wiki_base.rstrip("/")
-
         """
         If nothing is provided, we default to fetching all pages
         Only one or none of the following options should be specified so
@@ -131,6 +151,24 @@ class ConfluenceConnector(LoadConnector, PollConnector, SlimConnector):
             self.cql_label_filter = f" and label not in ({comma_separated_labels})"
 
         self.timezone: timezone = timezone(offset=timedelta(hours=timezone_offset))
+        self.credentials_provider: CredentialsProviderInterface | None = None
+
+        self.probe_kwargs = {
+            "max_backoff_retries": 6,
+            "max_backoff_seconds": 10,
+        }
+
+        self.final_kwargs = {
+            "max_backoff_retries": 10,
+            "max_backoff_seconds": 60,
+        }
+
+        # deprecated
+        self.continue_on_failure = continue_on_failure
+
+    def set_allow_images(self, value: bool) -> None:
+        logger.info(f"Setting allow_images to {value}.")
+        self.allow_images = value
 
     @property
     def confluence_client(self) -> OnyxConfluence:
@@ -138,23 +176,55 @@ class ConfluenceConnector(LoadConnector, PollConnector, SlimConnector):
             raise ConnectorMissingCredentialError("Confluence")
         return self._confluence_client
 
-    def load_credentials(self, credentials: dict[str, Any]) -> dict[str, Any] | None:
-        # see https://github.com/atlassian-api/atlassian-python-api/blob/master/atlassian/rest_client.py
-        # for a list of other hidden constructor args
-        self._confluence_client = build_confluence_client(
-            credentials=credentials,
-            is_cloud=self.is_cloud,
-            wiki_base=self.wiki_base,
-        )
-        return None
+    @property
+    def low_timeout_confluence_client(self) -> OnyxConfluence:
+        if self._low_timeout_confluence_client is None:
+            raise ConnectorMissingCredentialError("Confluence")
+        return self._low_timeout_confluence_client
 
-    def _construct_page_query(
+    def set_credentials_provider(
+        self, credentials_provider: CredentialsProviderInterface
+    ) -> None:
+        self.credentials_provider = credentials_provider
+
+        # raises exception if there's a problem
+        confluence_client = OnyxConfluence(
+            is_cloud=self.is_cloud,
+            url=self.wiki_base,
+            credentials_provider=credentials_provider,
+        )
+        confluence_client._probe_connection(**self.probe_kwargs)
+        confluence_client._initialize_connection(**self.final_kwargs)
+
+        self._confluence_client = confluence_client
+
+        # create a low timeout confluence client for sync flows
+        low_timeout_confluence_client = OnyxConfluence(
+            is_cloud=self.is_cloud,
+            url=self.wiki_base,
+            credentials_provider=credentials_provider,
+            timeout=3,
+        )
+        low_timeout_confluence_client._probe_connection(**self.probe_kwargs)
+        low_timeout_confluence_client._initialize_connection(**self.final_kwargs)
+
+        self._low_timeout_confluence_client = low_timeout_confluence_client
+
+    def load_credentials(self, credentials: dict[str, Any]) -> dict[str, Any] | None:
+        raise NotImplementedError("Use set_credentials_provider with this connector.")
+
+    def _construct_page_cql_query(
         self,
         start: SecondsSinceUnixEpoch | None = None,
         end: SecondsSinceUnixEpoch | None = None,
     ) -> str:
+        """
+        Constructs a CQL query for use in the confluence API. See
+        https://developer.atlassian.com/server/confluence/advanced-searching-using-cql/
+        for more information. This is JUST the CQL, not the full URL used to hit the API.
+        Use _build_page_retrieval_url to get the full URL.
+        """
         page_query = self.base_cql_page_query + self.cql_label_filter
-
         # Add time filters
         if start:
             formatted_start_time = datetime.fromtimestamp(
@@ -167,21 +237,20 @@ class ConfluenceConnector(LoadConnector, PollConnector, SlimConnector):
             )
             page_query += f" and lastmodified <= '{formatted_end_time}'"
 
+        page_query += " order by lastmodified asc"
         return page_query
 
     def _construct_attachment_query(self, confluence_page_id: str) -> str:
         attachment_query = f"type=attachment and container='{confluence_page_id}'"
         attachment_query += self.cql_label_filter
-        attachment_query += _FULL_EXTENSION_FILTER_STRING
         return attachment_query
 
     def _get_comment_string_for_page_id(self, page_id: str) -> str:
         comment_string = ""
-
         comment_cql = f"type=comment and container='{page_id}'"
         comment_cql += self.cql_label_filter
-
         expand = ",".join(_COMMENT_EXPANSION_FIELDS)
+
         for comment in self.confluence_client.paginated_cql_retrieval(
             cql=comment_cql,
             expand=expand,
@@ -192,129 +261,297 @@ class ConfluenceConnector(LoadConnector, PollConnector, SlimConnector):
                 confluence_object=comment,
                 fetched_titles=set(),
             )
-
         return comment_string
 
-    def _convert_object_to_document(
-        self, confluence_object: dict[str, Any]
-    ) -> Document | None:
+    def _convert_page_to_document(
+        self, page: dict[str, Any]
+    ) -> Document | ConnectorFailure:
         """
-        Takes in a confluence object, extracts all metadata, and converts it into a document.
-        If its a page, it extracts the text, adds the comments for the document text.
-        If its an attachment, it just downloads the attachment and converts that into a document.
+        Converts a Confluence page to a Document object.
+        Includes the page content, comments, and attachments.
         """
-        # The url and the id are the same
-        object_url = build_confluence_document_id(
-            self.wiki_base, confluence_object["_links"]["webui"], self.is_cloud
-        )
-
-        object_text = None
-        # Extract text from page
-        if confluence_object["type"] == "page":
-            object_text = extract_text_from_confluence_html(
-                confluence_client=self.confluence_client,
-                confluence_object=confluence_object,
-                fetched_titles={confluence_object.get("title", "")},
-            )
-            # Add comments to text
-            object_text += self._get_comment_string_for_page_id(confluence_object["id"])
-        elif confluence_object["type"] == "attachment":
-            object_text = attachment_to_content(
-                confluence_client=self.confluence_client, attachment=confluence_object
+        page_id = page_url = ""
+        try:
+            # Extract basic page information
+            page_id = page["id"]
+            page_title = page["title"]
+            logger.info(f"Converting page {page_title} to document")
+            page_url = build_confluence_document_id(
+                self.wiki_base, page["_links"]["webui"], self.is_cloud
             )
 
-        if object_text is None:
-            # This only happens for attachments that are not parseable
-            return None
+            # Get the page content
+            page_content = extract_text_from_confluence_html(
+                self.confluence_client, page, self._fetched_titles
+            )
 
-        # Get space name
-        doc_metadata: dict[str, str | list[str]] = {
-            "Wiki Space Name": confluence_object["space"]["name"]
-        }
+            # Create the main section for the page content
+            sections: list[TextSection | ImageSection] = [
+                TextSection(text=page_content, link=page_url)
+            ]
 
-        # Get labels
-        label_dicts = (
-            confluence_object.get("metadata", {}).get("labels", {}).get("results", [])
-        )
-        page_labels = [label.get("name") for label in label_dicts if label.get("name")]
-        if page_labels:
-            doc_metadata["labels"] = page_labels
+            # Process comments if available
+            comment_text = self._get_comment_string_for_page_id(page_id)
+            if comment_text:
+                sections.append(
+                    TextSection(text=comment_text, link=f"{page_url}#comments")
+                )
 
-        # Get last modified and author email
-        version_dict = confluence_object.get("version", {})
-        last_modified = (
-            datetime_from_string(version_dict.get("when"))
-            if version_dict.get("when")
-            else None
-        )
-        author_email = version_dict.get("by", {}).get("email")
+            # Process attachments
+            if "children" in page and "attachment" in page["children"]:
+                attachments = self.confluence_client.get_attachments_for_page(
+                    page_id, expand="metadata"
+                )
 
-        title = confluence_object.get("title", "Untitled Document")
+                for attachment in attachments.get("results", []):
+                    # Process each attachment
+                    result = process_attachment(
+                        self.confluence_client,
+                        attachment,
+                        page_id,
+                        self.allow_images,
+                    )
 
-        return Document(
-            id=object_url,
-            sections=[Section(link=object_url, text=object_text)],
-            source=DocumentSource.CONFLUENCE,
-            semantic_identifier=title,
-            doc_updated_at=last_modified,
-            primary_owners=(
-                [BasicExpertInfo(email=author_email)] if author_email else None
-            ),
-            metadata=doc_metadata,
-        )
+                    if result and result.text:
+                        # Create a section for the attachment text
+                        attachment_section = TextSection(
+                            text=result.text,
+                            link=f"{page_url}#attachment-{attachment['id']}",
+                        )
+                        sections.append(attachment_section)
+                    elif result and result.file_name:
+                        # Create an ImageSection for image attachments
+                        image_section = ImageSection(
+                            link=f"{page_url}#attachment-{attachment['id']}",
+                            image_file_name=result.file_name,
+                        )
+                        sections.append(image_section)
+                    else:
+                        logger.warning(
+                            f"Error processing attachment '{attachment.get('title')}':",
+                            f"{result.error if result else 'Unknown error'}",
+                        )
+
+            # Extract metadata
+            metadata = {}
+            if "space" in page:
+                metadata["space"] = page["space"].get("name", "")
+
+            # Extract labels
+            labels = []
+            if "metadata" in page and "labels" in page["metadata"]:
+                for label in page["metadata"]["labels"].get("results", []):
+                    labels.append(label.get("name", ""))
+            if labels:
+                metadata["labels"] = labels
+
+            # Extract owners
+            primary_owners = []
+            if "version" in page and "by" in page["version"]:
+                author = page["version"]["by"]
+                display_name = author.get("displayName", "Unknown")
+                email = author.get("email", "unknown@domain.invalid")
+                primary_owners.append(
+                    BasicExpertInfo(display_name=display_name, email=email)
+                )
+
+            # Create the document
+            return Document(
+                id=page_url,
+                sections=sections,
+                source=DocumentSource.CONFLUENCE,
+                semantic_identifier=page_title,
+                metadata=metadata,
+                doc_updated_at=datetime_from_string(page["version"]["when"]),
+                primary_owners=primary_owners if primary_owners else None,
+            )
+        except Exception as e:
+            logger.error(f"Error converting page {page.get('id', 'unknown')}: {e}")
+            if _should_propagate_error(e):
+                raise
+            return ConnectorFailure(
+                failed_document=DocumentFailure(
+                    document_id=page_id,
+                    document_link=page_url,
+                ),
+                failure_message=f"Error converting page {page.get('id', 'unknown')}: {e}",
+                exception=e,
+            )
+
+    def _fetch_page_attachments(
+        self, page: dict[str, Any], doc: Document
+    ) -> Document | ConnectorFailure:
+        attachment_query = self._construct_attachment_query(page["id"])
+
+        for attachment in self.confluence_client.paginated_cql_retrieval(
+            cql=attachment_query,
+            expand=",".join(_ATTACHMENT_EXPANSION_FIELDS),
+        ):
+            media_type: str = attachment.get("metadata", {}).get("mediaType", "")
+
+            # TODO(rkuo): this check is partially redundant with validate_attachment_filetype
+            # and checks in convert_attachment_to_content/process_attachment
+            # but doing the check here avoids an unnecessary download. Due for refactoring.
+            if not self.allow_images:
+                if media_type.startswith("image/"):
+                    logger.info(
+                        f"Skipping attachment because allow images is False: {attachment['title']}"
+                    )
+                    continue
+
+            if not validate_attachment_filetype(
+                attachment,
+            ):
+                logger.info(
+                    f"Skipping attachment because it is not an accepted file type: {attachment['title']}"
+                )
+                continue
+
+            logger.info(
+                f"Processing attachment: {attachment['title']} attached to page {page['title']}"
+            )
+
+            # Attempt to get textual content or image summarization:
+            object_url = build_confluence_document_id(
+                self.wiki_base, attachment["_links"]["webui"], self.is_cloud
+            )
+            try:
+                response = convert_attachment_to_content(
+                    confluence_client=self.confluence_client,
+                    attachment=attachment,
+                    page_id=page["id"],
+                    allow_images=self.allow_images,
+                )
+                if response is None:
+                    continue
+
+                content_text, file_storage_name = response
+
+                if content_text:
+                    doc.sections.append(
+                        TextSection(
+                            text=content_text,
+                            link=object_url,
+                        )
+                    )
+                elif file_storage_name:
+                    doc.sections.append(
+                        ImageSection(
+                            link=object_url,
+                            image_file_name=file_storage_name,
+                        )
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Failed to extract/summarize attachment {attachment['title']}",
+                    exc_info=e,
+                )
+                if _should_propagate_error(e):
+                    raise
+                return ConnectorFailure(
+                    failed_document=DocumentFailure(
+                        document_id=doc.id,
+                        document_link=object_url,
+                    ),
+                    failure_message=f"Failed to extract/summarize attachment {attachment['title']} for doc {doc.id}",
+                    exception=e,
+                )
+        return doc
 
     def _fetch_document_batches(
         self,
+        checkpoint: ConfluenceCheckpoint,
         start: SecondsSinceUnixEpoch | None = None,
         end: SecondsSinceUnixEpoch | None = None,
-    ) -> GenerateDocumentsOutput:
-        doc_batch: list[Document] = []
-        confluence_page_ids: list[str] = []
+    ) -> CheckpointOutput[ConfluenceCheckpoint]:
+        """
+        Yields batches of Documents. For each page:
+         - Create a Document with 1 Section for the page text/comments
+         - Then fetch attachments. For each attachment:
+             - Attempt to convert it with convert_attachment_to_content(...)
+             - If successful, create a new Section with the extracted text or summary.
+        """
+        checkpoint = copy.deepcopy(checkpoint)
 
-        page_query = self._construct_page_query(start, end)
-        logger.debug(f"page_query: {page_query}")
-        # Fetch pages as Documents
-        for page in self.confluence_client.paginated_cql_retrieval(
-            cql=page_query,
-            expand=",".join(_PAGE_EXPANSION_FIELDS),
+        # use "start" when last_updated is 0 or for confluence server
+        start_ts = start
+        page_query_url = checkpoint.next_page_url or self._build_page_retrieval_url(
+            start_ts, end, self.batch_size
+        )
+        logger.debug(f"page_query_url: {page_query_url}")
+
+        # store the next page start for confluence server, cursor for confluence cloud
+        def store_next_page_url(next_page_url: str) -> None:
+            checkpoint.next_page_url = next_page_url
+
+        for page in self.confluence_client.paginated_page_retrieval(
+            cql_url=page_query_url,
             limit=self.batch_size,
+            next_page_callback=store_next_page_url,
         ):
-            logger.debug(f"_fetch_document_batches: {page['id']}")
-            confluence_page_ids.append(page["id"])
-            doc = self._convert_object_to_document(page)
-            if doc is not None:
-                doc_batch.append(doc)
-            if len(doc_batch) >= self.batch_size:
-                yield doc_batch
-                doc_batch = []
+            # Build doc from page
+            doc_or_failure = self._convert_page_to_document(page)
 
-        # Fetch attachments as Documents
-        for confluence_page_id in confluence_page_ids:
-            attachment_query = self._construct_attachment_query(confluence_page_id)
-            # TODO: maybe should add time filter as well?
-            for attachment in self.confluence_client.paginated_cql_retrieval(
-                cql=attachment_query,
-                expand=",".join(_ATTACHMENT_EXPANSION_FIELDS),
-            ):
-                doc = self._convert_object_to_document(attachment)
-                if doc is not None:
-                    doc_batch.append(doc)
-                if len(doc_batch) >= self.batch_size:
-                    yield doc_batch
-                    doc_batch = []
+            if isinstance(doc_or_failure, ConnectorFailure):
+                yield doc_or_failure
+                continue
+            # Now get attachments for that page:
+            doc_or_failure = self._fetch_page_attachments(page, doc_or_failure)
 
-        if doc_batch:
-            yield doc_batch
+            # yield completed document (or failure)
+            yield doc_or_failure
 
-    def load_from_state(self) -> GenerateDocumentsOutput:
-        return self._fetch_document_batches()
+            # Create checkpoint once a full page of results is returned
+            if checkpoint.next_page_url and checkpoint.next_page_url != page_query_url:
+                return checkpoint
 
-    def poll_source(
+        checkpoint.has_more = False
+        return checkpoint
+
+    def _build_page_retrieval_url(
         self,
-        start: SecondsSinceUnixEpoch | None = None,
-        end: SecondsSinceUnixEpoch | None = None,
-    ) -> GenerateDocumentsOutput:
-        return self._fetch_document_batches(start, end)
+        start: SecondsSinceUnixEpoch | None,
+        end: SecondsSinceUnixEpoch | None,
+        limit: int,
+    ) -> str:
+        """
+        Builds the full URL used to retrieve pages from the confluence API.
+        This can be used as input to the confluence client's _paginate_url
+        or paginated_page_retrieval methods.
+        """
+        page_query = self._construct_page_cql_query(start, end)
+        cql_url = self.confluence_client.build_cql_url(
+            page_query, expand=",".join(_PAGE_EXPANSION_FIELDS)
+        )
+        return update_param_in_path(cql_url, "limit", str(limit))
+
+    @override
+    def load_from_checkpoint(
+        self,
+        start: SecondsSinceUnixEpoch,
+        end: SecondsSinceUnixEpoch,
+        checkpoint: ConfluenceCheckpoint,
+    ) -> CheckpointOutput[ConfluenceCheckpoint]:
+        end += ONE_DAY  # handle time zone weirdness
+        try:
+            return self._fetch_document_batches(checkpoint, start, end)
+        except Exception as e:
+            if _should_propagate_error(e) and start is not None:
+                logger.warning(
+                    "Confluence says we provided an invalid 'updated' field. This may indicate"
+                    "a real issue, but can also appear during edge cases like daylight"
+                    f"savings time changes. Retrying with a 1 hour offset. Error: {e}"
+                )
+                return self._fetch_document_batches(checkpoint, start - ONE_HOUR, end)
+            raise
+
+    @override
+    def build_dummy_checkpoint(self) -> ConfluenceCheckpoint:
+        return ConfluenceCheckpoint(has_more=True, next_page_url=None)
+
+    @override
+    def validate_checkpoint_json(self, checkpoint_json: str) -> ConfluenceCheckpoint:
+        return ConfluenceCheckpoint.model_validate_json(checkpoint_json)
 
     def retrieve_all_slim_documents(
         self,
@@ -322,55 +559,63 @@ class ConfluenceConnector(LoadConnector, PollConnector, SlimConnector):
         end: SecondsSinceUnixEpoch | None = None,
         callback: IndexingHeartbeatInterface | None = None,
     ) -> GenerateSlimDocumentOutput:
+        """
+        Return 'slim' docs (IDs + minimal permission data).
+        Does not fetch actual text. Used primarily for incremental permission sync.
+        """
         doc_metadata_list: list[SlimDocument] = []
-
         restrictions_expand = ",".join(_RESTRICTIONS_EXPANSION_FIELDS)
 
+        # Query pages
         page_query = self.base_cql_page_query + self.cql_label_filter
         for page in self.confluence_client.cql_paginate_all_expansions(
             cql=page_query,
             expand=restrictions_expand,
             limit=_SLIM_DOC_BATCH_SIZE,
         ):
-            # If the page has restrictions, add them to the perm_sync_data
-            # These will be used by doc_sync.py to sync permissions
             page_restrictions = page.get("restrictions")
             page_space_key = page.get("space", {}).get("key")
             page_ancestors = page.get("ancestors", [])
+
             page_perm_sync_data = {
                 "restrictions": page_restrictions or {},
                 "space_key": page_space_key,
-                "ancestors": page_ancestors or [],
+                "ancestors": page_ancestors,
             }
 
             doc_metadata_list.append(
                 SlimDocument(
                     id=build_confluence_document_id(
-                        self.wiki_base,
-                        page["_links"]["webui"],
-                        self.is_cloud,
+                        self.wiki_base, page["_links"]["webui"], self.is_cloud
                     ),
                     perm_sync_data=page_perm_sync_data,
                 )
             )
+
+            # Query attachments for each page
             attachment_query = self._construct_attachment_query(page["id"])
             for attachment in self.confluence_client.cql_paginate_all_expansions(
                 cql=attachment_query,
                 expand=restrictions_expand,
                 limit=_SLIM_DOC_BATCH_SIZE,
             ):
-                if not validate_attachment_filetype(attachment):
+                # If you skip images, you'll skip them in the permission sync
+                attachment["metadata"].get("mediaType", "")
+                if not validate_attachment_filetype(
+                    attachment,
+                ):
                     continue
-                attachment_restrictions = attachment.get("restrictions")
+
+                attachment_restrictions = attachment.get("restrictions", {})
                 if not attachment_restrictions:
-                    attachment_restrictions = page_restrictions
+                    attachment_restrictions = page_restrictions or {}
 
                 attachment_space_key = attachment.get("space", {}).get("key")
                 if not attachment_space_key:
                     attachment_space_key = page_space_key
 
                 attachment_perm_sync_data = {
-                    "restrictions": attachment_restrictions or {},
+                    "restrictions": attachment_restrictions,
                     "space_key": attachment_space_key,
                 }
 
@@ -384,16 +629,43 @@ class ConfluenceConnector(LoadConnector, PollConnector, SlimConnector):
                         perm_sync_data=attachment_perm_sync_data,
                     )
                 )
+
             if len(doc_metadata_list) > _SLIM_DOC_BATCH_SIZE:
                 yield doc_metadata_list[:_SLIM_DOC_BATCH_SIZE]
                 doc_metadata_list = doc_metadata_list[_SLIM_DOC_BATCH_SIZE:]
 
+                if callback and callback.should_stop():
+                    raise RuntimeError(
+                        "retrieve_all_slim_documents: Stop signal detected"
+                    )
                 if callback:
-                    if callback.should_stop():
-                        raise RuntimeError(
-                            "retrieve_all_slim_documents: Stop signal detected"
-                        )
-
                     callback.progress("retrieve_all_slim_documents", 1)
 
         yield doc_metadata_list
+
+    def validate_connector_settings(self) -> None:
+        try:
+            spaces = self.low_timeout_confluence_client.get_all_spaces(limit=1)
+        except HTTPError as e:
+            status_code = e.response.status_code if e.response else None
+            if status_code == 401:
+                raise CredentialExpiredError(
+                    "Invalid or expired Confluence credentials (HTTP 401)."
+                )
+            elif status_code == 403:
+                raise InsufficientPermissionsError(
+                    "Insufficient permissions to access Confluence resources (HTTP 403)."
+                )
+            raise UnexpectedValidationError(
+                f"Unexpected Confluence error (status={status_code}): {e}"
+            )
+        except Exception as e:
+            raise UnexpectedValidationError(
+                f"Unexpected error while validating Confluence settings: {e}"
+            )
+
+        if not spaces or not spaces.get("results"):
+            raise ConnectorValidationError(
+                "No Confluence spaces found. Either your credentials lack permissions, or "
+                "there truly are no spaces in this Confluence instance."
+            )

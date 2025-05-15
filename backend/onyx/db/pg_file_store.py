@@ -4,8 +4,12 @@ from typing import IO
 
 from psycopg2.extensions import connection
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import and_
+from sqlalchemy.sql import select
 
+from onyx.background.task_utils import QUERY_REPORT_NAME_PREFIX
 from onyx.configs.constants import FileOrigin
+from onyx.configs.constants import FileType
 from onyx.db.models import PGFileStore
 from onyx.file_store.constants import MAX_IN_MEMORY_SIZE
 from onyx.file_store.constants import STANDARD_CHUNK_SIZE
@@ -16,6 +20,13 @@ logger = setup_logger()
 
 def get_pg_conn_from_session(db_session: Session) -> connection:
     return db_session.connection().connection.connection  # type: ignore
+
+
+def get_pgfilestore_by_file_name_optional(
+    file_name: str,
+    db_session: Session,
+) -> PGFileStore | None:
+    return db_session.query(PGFileStore).filter_by(file_name=file_name).first()
 
 
 def get_pgfilestore_by_file_name(
@@ -67,6 +78,9 @@ def read_lobj(
     use_tempfile: bool = False,
 ) -> IO:
     pg_conn = get_pg_conn_from_session(db_session)
+    # Ensure we're using binary mode by default for large objects
+    if mode is None:
+        mode = "rb"
     large_object = (
         pg_conn.lobject(lobj_oid, mode=mode) if mode else pg_conn.lobject(lobj_oid)
     )
@@ -81,6 +95,7 @@ def read_lobj(
         temp_file.seek(0)
         return temp_file
     else:
+        # Ensure we're getting raw bytes without text decoding
         return BytesIO(large_object.read())
 
 
@@ -148,3 +163,44 @@ def upsert_pgfilestore(
         db_session.commit()
 
     return pgfilestore
+
+
+def save_bytes_to_pgfilestore(
+    db_session: Session,
+    raw_bytes: bytes,
+    media_type: str,
+    identifier: str,
+    display_name: str,
+    file_origin: FileOrigin = FileOrigin.OTHER,
+) -> PGFileStore:
+    """
+    Saves raw bytes to PGFileStore and returns the resulting record.
+    """
+    file_name = f"{file_origin.name.lower()}_{identifier}"
+    lobj_oid = create_populate_lobj(BytesIO(raw_bytes), db_session)
+    pgfilestore = upsert_pgfilestore(
+        file_name=file_name,
+        display_name=display_name,
+        file_origin=file_origin,
+        file_type=media_type,
+        lobj_oid=lobj_oid,
+        db_session=db_session,
+        commit=True,
+    )
+    return pgfilestore
+
+
+def get_query_history_export_files(
+    db_session: Session,
+) -> list[PGFileStore]:
+    return list(
+        db_session.scalars(
+            select(PGFileStore).where(
+                and_(
+                    PGFileStore.file_name.like(f"{QUERY_REPORT_NAME_PREFIX}-%"),
+                    PGFileStore.file_type == FileType.CSV,
+                    PGFileStore.file_origin == FileOrigin.QUERY_HISTORY_CSV,
+                )
+            )
+        )
+    )

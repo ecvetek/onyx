@@ -1,6 +1,5 @@
-import React, { Dispatch, FC, SetStateAction } from "react";
+import React, { FC, useEffect } from "react";
 import { AdminBooleanFormField } from "@/components/credentials/CredentialFields";
-import { FileUpload } from "@/components/admin/connectors/FileUpload";
 import { TabOption } from "@/lib/connectors/connectors";
 import SelectInput from "./ConnectorInput/SelectInput";
 import NumberInput from "./ConnectorInput/NumberInput";
@@ -16,6 +15,7 @@ import {
   TabsList,
   TabsTrigger,
 } from "@/components/ui/fully_wrapped_tabs";
+import { useFormikContext } from "formik";
 
 interface TabsFieldProps {
   tabField: TabOption;
@@ -123,6 +123,8 @@ export const RenderField: FC<RenderFieldProps> = ({
   connector,
   currentCredential,
 }) => {
+  const { setFieldValue } = useFormikContext<any>(); // Get Formik's context functions
+
   const label =
     typeof field.label === "function"
       ? field.label(currentCredential)
@@ -131,6 +133,22 @@ export const RenderField: FC<RenderFieldProps> = ({
     typeof field.description === "function"
       ? field.description(currentCredential)
       : field.description;
+  const disabled =
+    typeof field.disabled === "function"
+      ? field.disabled(currentCredential)
+      : (field.disabled ?? false);
+  const initialValue =
+    typeof field.initial === "function"
+      ? field.initial(currentCredential)
+      : (field.initial ?? "");
+
+  // if initialValue exists, prepopulate the field with it
+  useEffect(() => {
+    const field_value = values[field.name];
+    if (initialValue && field_value === undefined) {
+      setFieldValue(field.name, initialValue);
+    }
+  }, [field.name, initialValue, setFieldValue, values]);
 
   if (field.type === "tab") {
     return (
@@ -176,6 +194,8 @@ export const RenderField: FC<RenderFieldProps> = ({
           subtext={description}
           name={field.name}
           label={label}
+          disabled={disabled}
+          onChange={(e) => setFieldValue(field.name, e.target.value)}
         />
       ) : field.type === "text" ? (
         <TextFormField
@@ -186,6 +206,8 @@ export const RenderField: FC<RenderFieldProps> = ({
           name={field.name}
           isTextArea={field.isTextArea || false}
           defaultHeight={"h-15"}
+          disabled={disabled}
+          onChange={(e) => setFieldValue(field.name, e.target.value)}
         />
       ) : field.type === "string_tab" ? (
         <div className="text-center">{description}</div>

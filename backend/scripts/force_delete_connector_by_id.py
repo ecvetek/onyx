@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 from onyx.db.document import delete_documents_complete__no_commit
 from onyx.db.enums import ConnectorCredentialPairStatus
 from onyx.db.search_settings import get_active_search_settings
+from onyx.db.tag import delete_orphan_tags__no_commit
+from shared_configs.configs import POSTGRES_DEFAULT_SCHEMA
 
 # Modify sys.path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -74,7 +76,7 @@ def _unsafe_deletion(
         for document in documents:
             document_index.delete_single(
                 doc_id=document.id,
-                tenant_id=None,
+                tenant_id=POSTGRES_DEFAULT_SCHEMA,
                 chunk_count=document.chunk_count,
             )
 
@@ -82,6 +84,7 @@ def _unsafe_deletion(
             db_session=db_session,
             document_ids=[document.id for document in documents],
         )
+        delete_orphan_tags__no_commit(db_session=db_session)
 
         num_docs_deleted += len(documents)
 

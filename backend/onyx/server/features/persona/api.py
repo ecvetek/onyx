@@ -11,14 +11,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from onyx.auth.users import current_admin_user
-from onyx.auth.users import current_chat_accesssible_user
+from onyx.auth.users import current_chat_accessible_user
 from onyx.auth.users import current_curator_or_admin_user
 from onyx.auth.users import current_limited_user
 from onyx.auth.users import current_user
 from onyx.configs.constants import FileOrigin
 from onyx.configs.constants import MilestoneRecordType
 from onyx.configs.constants import NotificationType
-from onyx.db.engine import get_current_tenant_id
 from onyx.db.engine import get_session
 from onyx.db.models import StarterMessageModel as StarterMessage
 from onyx.db.models import User
@@ -44,6 +43,7 @@ from onyx.file_store.models import ChatFileType
 from onyx.secondary_llm_flows.starter_message_creation import (
     generate_starter_messages,
 )
+from onyx.server.features.persona.models import FullPersonaSnapshot
 from onyx.server.features.persona.models import GenerateStarterMessageRequest
 from onyx.server.features.persona.models import ImageGenerationToolStatus
 from onyx.server.features.persona.models import PersonaLabelCreate
@@ -56,9 +56,9 @@ from onyx.server.models import DisplayPriorityRequest
 from onyx.tools.utils import is_image_generation_available
 from onyx.utils.logger import setup_logger
 from onyx.utils.telemetry import create_milestone_and_report
+from shared_configs.contextvars import get_current_tenant_id
 
 logger = setup_logger()
-
 
 admin_router = APIRouter(prefix="/admin/persona")
 basic_router = APIRouter(prefix="/persona")
@@ -92,7 +92,7 @@ def patch_persona_visibility(
 
 
 @basic_router.patch("/{persona_id}/public")
-def patch_user_presona_public_status(
+def patch_user_persona_public_status(
     persona_id: int,
     is_public_request: IsPublicRequest,
     user: User | None = Depends(current_user),
@@ -173,7 +173,7 @@ def undelete_persona(
     )
 
 
-# used for assistat profile pictures
+# used for assistant profile pictures
 @admin_router.post("/upload-image")
 def upload_file(
     file: UploadFile,
@@ -201,14 +201,16 @@ def create_persona(
     persona_upsert_request: PersonaUpsertRequest,
     user: User | None = Depends(current_user),
     db_session: Session = Depends(get_session),
-    tenant_id: str | None = Depends(get_current_tenant_id),
 ) -> PersonaSnapshot:
+    tenant_id = get_current_tenant_id()
+
     prompt_id = (
         persona_upsert_request.prompt_ids[0]
         if persona_upsert_request.prompt_ids
         and len(persona_upsert_request.prompt_ids) > 0
         else None
     )
+
     prompt = upsert_prompt(
         db_session=db_session,
         user=user,
@@ -379,8 +381,9 @@ def delete_persona(
 
 @basic_router.get("/image-generation-tool")
 def get_image_generation_tool(
-    _: User
-    | None = Depends(current_user),  # User param not used but kept for consistency
+    _: User | None = Depends(
+        current_user
+    ),  # User param not used but kept for consistency
     db_session: Session = Depends(get_session),
 ) -> ImageGenerationToolStatus:  # Use bool instead of str for boolean values
     is_available = is_image_generation_available(db_session=db_session)
@@ -389,7 +392,7 @@ def get_image_generation_tool(
 
 @basic_router.get("")
 def list_personas(
-    user: User | None = Depends(current_chat_accesssible_user),
+    user: User | None = Depends(current_chat_accessible_user),
     db_session: Session = Depends(get_session),
     include_deleted: bool = False,
     persona_ids: list[int] = Query(None),
@@ -423,8 +426,8 @@ def get_persona(
     persona_id: int,
     user: User | None = Depends(current_limited_user),
     db_session: Session = Depends(get_session),
-) -> PersonaSnapshot:
-    return PersonaSnapshot.from_model(
+) -> FullPersonaSnapshot:
+    return FullPersonaSnapshot.from_model(
         get_persona_by_id(
             persona_id=persona_id,
             user=user,

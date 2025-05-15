@@ -9,14 +9,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Download, XIcon, ZoomIn, ZoomOut } from "lucide-react";
-import { OnyxDocument } from "@/lib/search/interfaces";
-import { MinimalMarkdown } from "./MinimalMarkdown";
+import { MinimalOnyxDocument } from "@/lib/search/interfaces";
+import MinimalMarkdown from "@/components/chat/MinimalMarkdown";
 
 interface TextViewProps {
-  presentingDocument: OnyxDocument;
+  presentingDocument: MinimalOnyxDocument;
   onClose: () => void;
 }
-
 export default function TextView({
   presentingDocument,
   onClose,
@@ -27,6 +26,13 @@ export default function TextView({
   const [fileName, setFileName] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [fileType, setFileType] = useState("application/octet-stream");
+  const [renderCount, setRenderCount] = useState(0);
+
+  // Log render count on each render
+  useEffect(() => {
+    setRenderCount((prevCount) => prevCount + 1);
+    console.log(`TextView component rendered ${renderCount + 1} times`);
+  }, []);
 
   // Detect if a given MIME type is one of the recognized markdown formats
   const isMarkdownFormat = (mimeType: string): boolean => {
@@ -41,6 +47,15 @@ export default function TextView({
     return markdownFormats.some((format) => mimeType.startsWith(format));
   };
 
+  const isImageFormat = (mimeType: string) => {
+    const imageFormats = [
+      "image/png",
+      "image/jpeg",
+      "image/gif",
+      "image/svg+xml",
+    ];
+    return imageFormats.some((format) => mimeType.startsWith(format));
+  };
   // Detect if a given MIME type can be rendered in an <iframe>
   const isSupportedIframeFormat = (mimeType: string): boolean => {
     const supportedFormats = [
@@ -54,8 +69,11 @@ export default function TextView({
   };
 
   const fetchFile = useCallback(async () => {
+    console.log("fetching file");
     setIsLoading(true);
-    const fileId = presentingDocument.document_id.split("__")[1];
+    const fileId =
+      presentingDocument.document_id.split("__")[1] ||
+      presentingDocument.document_id;
 
     try {
       const response = await fetch(
@@ -96,18 +114,19 @@ export default function TextView({
       // Keep the slight delay for a smoother loading experience
       setTimeout(() => {
         setIsLoading(false);
+        console.log("finished loading");
       }, 1000);
     }
   }, [presentingDocument]);
 
   useEffect(() => {
     fetchFile();
-  }, [fetchFile]);
+  }, []);
 
   const handleDownload = () => {
     const link = document.createElement("a");
     link.href = fileUrl;
-    link.download = fileName;
+    link.download = presentingDocument.document_id || fileName;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -120,12 +139,13 @@ export default function TextView({
     <Dialog open onOpenChange={onClose}>
       <DialogContent
         hideCloseIcon
-        className="max-w-5xl w-[90vw] flex flex-col justify-between gap-y-0 h-full max-h-[80vh] p-0"
+        className="max-w-4xl w-[90vw] flex flex-col justify-between gap-y-0 h-full max-h-[80vh] p-0"
       >
         <DialogHeader className="px-4 mb-0 pt-2 pb-3 flex flex-row items-center justify-between border-b">
           <DialogTitle className="text-lg font-medium truncate">
             {fileName}
           </DialogTitle>
+
           <div className="flex items-center space-x-2">
             <Button variant="ghost" size="icon" onClick={handleZoomOut}>
               <ZoomOut className="h-4 w-4" />
@@ -146,7 +166,6 @@ export default function TextView({
             </Button>
           </div>
         </DialogHeader>
-
         <div className="mt-0 rounded-b-lg flex-1 overflow-hidden">
           <div className="flex items-center justify-center w-full h-full">
             {isLoading ? (
@@ -161,7 +180,13 @@ export default function TextView({
                 className="w-full h-full transform origin-center transition-transform duration-300 ease-in-out"
                 style={{ transform: `scale(${zoom / 100})` }}
               >
-                {isSupportedIframeFormat(fileType) ? (
+                {isImageFormat(fileType) ? (
+                  <img
+                    src={fileUrl}
+                    alt={fileName}
+                    className="w-full h-full object-contain object-center"
+                  />
+                ) : isSupportedIframeFormat(fileType) ? (
                   <iframe
                     src={`${fileUrl}#toolbar=0`}
                     className="w-full h-full border-none"

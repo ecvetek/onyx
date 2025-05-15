@@ -22,8 +22,9 @@ from onyx.configs.constants import OnyxCeleryPriority
 from onyx.configs.constants import OnyxCeleryQueues
 from onyx.configs.constants import OnyxCeleryTask
 from onyx.configs.constants import OnyxRedisConstants
+from onyx.db.connector_credential_pair import get_connector_credential_pair_from_id
 from onyx.db.engine import get_db_current_time
-from onyx.db.engine import get_session_with_tenant
+from onyx.db.engine import get_session_with_current_tenant
 from onyx.db.enums import ConnectorCredentialPairStatus
 from onyx.db.enums import IndexingStatus
 from onyx.db.enums import IndexModelStatus
@@ -31,6 +32,8 @@ from onyx.db.index_attempt import create_index_attempt
 from onyx.db.index_attempt import delete_index_attempt
 from onyx.db.index_attempt import get_all_index_attempts_by_status
 from onyx.db.index_attempt import get_index_attempt
+from onyx.db.index_attempt import get_last_attempt_for_cc_pair
+from onyx.db.index_attempt import get_recent_attempts_for_cc_pair
 from onyx.db.index_attempt import mark_attempt_failed
 from onyx.db.models import ConnectorCredentialPair
 from onyx.db.models import IndexAttempt
@@ -43,6 +46,8 @@ from onyx.redis.redis_pool import redis_lock_dump
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
+
+NUM_REPEAT_ERRORS_BEFORE_REPEATED_ERROR_STATE = 5
 
 
 def get_unfenced_index_attempt_ids(db_session: Session, r: redis.Redis) -> list[int]:
@@ -93,27 +98,25 @@ def get_unfenced_index_attempt_ids(db_session: Session, r: redis.Redis) -> list[
     return unfenced_attempts
 
 
-class IndexingCallback(IndexingHeartbeatInterface):
+class IndexingCallbackBase(IndexingHeartbeatInterface):
     PARENT_CHECK_INTERVAL = 60
 
     def __init__(
         self,
         parent_pid: int,
         redis_connector: RedisConnector,
-        redis_connector_index: RedisConnectorIndex,
         redis_lock: RedisLock,
         redis_client: Redis,
     ):
         super().__init__()
         self.parent_pid = parent_pid
         self.redis_connector: RedisConnector = redis_connector
-        self.redis_connector_index: RedisConnectorIndex = redis_connector_index
         self.redis_lock: RedisLock = redis_lock
         self.redis_client = redis_client
         self.started: datetime = datetime.now(timezone.utc)
         self.redis_lock.reacquire()
 
-        self.last_tag: str = "IndexingCallback.__init__"
+        self.last_tag: str = f"{self.__class__.__name__}.__init__"
         self.last_lock_reacquire: datetime = datetime.now(timezone.utc)
         self.last_lock_monotonic = time.monotonic()
 
@@ -126,9 +129,11 @@ class IndexingCallback(IndexingHeartbeatInterface):
         return False
 
     def progress(self, tag: str, amount: int) -> None:
+        """Amount isn't used yet."""
+
         # rkuo: this shouldn't be necessary yet because we spawn the process this runs inside
-        # with daemon = True. It seems likely some indexing tasks will need to spawn other processes eventually
-        # so leave this code in until we're ready to test it.
+        # with daemon=True. It seems likely some indexing tasks will need to spawn other processes
+        # eventually, which daemon=True prevents, so leave this code in until we're ready to test it.
 
         # if self.parent_pid:
         #     # check if the parent pid is alive so we aren't running as a zombie
@@ -143,8 +148,6 @@ class IndexingCallback(IndexingHeartbeatInterface):
         #         self.last_parent_check = now
 
         try:
-            self.redis_connector.prune.set_active()
-
             current_time = time.monotonic()
             if current_time - self.last_lock_monotonic >= (
                 CELERY_GENERIC_BEAT_LOCK_TIMEOUT / 4
@@ -156,7 +159,7 @@ class IndexingCallback(IndexingHeartbeatInterface):
             self.last_tag = tag
         except LockError:
             logger.exception(
-                f"IndexingCallback - lock.reacquire exceptioned: "
+                f"{self.__class__.__name__} - lock.reacquire exceptioned: "
                 f"lock_timeout={self.redis_lock.timeout} "
                 f"start={self.started} "
                 f"last_tag={self.last_tag} "
@@ -167,13 +170,31 @@ class IndexingCallback(IndexingHeartbeatInterface):
             redis_lock_dump(self.redis_lock, self.redis_client)
             raise
 
+
+class IndexingCallback(IndexingCallbackBase):
+    def __init__(
+        self,
+        parent_pid: int,
+        redis_connector: RedisConnector,
+        redis_lock: RedisLock,
+        redis_client: Redis,
+        redis_connector_index: RedisConnectorIndex,
+    ):
+        super().__init__(parent_pid, redis_connector, redis_lock, redis_client)
+
+        self.redis_connector_index: RedisConnectorIndex = redis_connector_index
+
+    def progress(self, tag: str, amount: int) -> None:
+        self.redis_connector_index.set_active()
+        self.redis_connector_index.set_connector_active()
+        super().progress(tag, amount)
         self.redis_client.incrby(
             self.redis_connector_index.generator_progress_key, amount
         )
 
 
 def validate_indexing_fence(
-    tenant_id: str | None,
+    tenant_id: str,
     key_bytes: bytes,
     reserved_tasks: set[str],
     r_celery: Redis,
@@ -297,7 +318,7 @@ def validate_indexing_fence(
 
 
 def validate_indexing_fences(
-    tenant_id: str | None,
+    tenant_id: str,
     r_replica: Redis,
     r_celery: Redis,
     lock_beat: RedisLock,
@@ -318,7 +339,7 @@ def validate_indexing_fences(
         if not key_str.startswith(RedisConnectorIndex.FENCE_PREFIX):
             continue
 
-        with get_session_with_tenant(tenant_id) as db_session:
+        with get_session_with_current_tenant() as db_session:
             validate_indexing_fence(
                 tenant_id,
                 key_bytes,
@@ -332,11 +353,43 @@ def validate_indexing_fences(
     return
 
 
-def _should_index(
+def is_in_repeated_error_state(
+    cc_pair_id: int, search_settings_id: int, db_session: Session
+) -> bool:
+    """Checks if the cc pair / search setting combination is in a repeated error state."""
+    cc_pair = get_connector_credential_pair_from_id(
+        db_session=db_session,
+        cc_pair_id=cc_pair_id,
+    )
+    if not cc_pair:
+        raise RuntimeError(
+            f"is_in_repeated_error_state - could not find cc_pair with id={cc_pair_id}"
+        )
+
+    # if the connector doesn't have a refresh_freq, a single failed attempt is enough
+    number_of_failed_attempts_in_a_row_needed = (
+        NUM_REPEAT_ERRORS_BEFORE_REPEATED_ERROR_STATE
+        if cc_pair.connector.refresh_freq is not None
+        else 1
+    )
+
+    most_recent_index_attempts = get_recent_attempts_for_cc_pair(
+        cc_pair_id=cc_pair_id,
+        search_settings_id=search_settings_id,
+        limit=number_of_failed_attempts_in_a_row_needed,
+        db_session=db_session,
+    )
+    return len(
+        most_recent_index_attempts
+    ) >= number_of_failed_attempts_in_a_row_needed and all(
+        attempt.status == IndexingStatus.FAILED
+        for attempt in most_recent_index_attempts
+    )
+
+
+def should_index(
     cc_pair: ConnectorCredentialPair,
-    last_index: IndexAttempt | None,
     search_settings_instance: SearchSettings,
-    search_settings_primary: bool,
     secondary_index_building: bool,
     db_session: Session,
 ) -> bool:
@@ -349,6 +402,16 @@ def _should_index(
     Return True if we should try to index, False if not.
     """
     connector = cc_pair.connector
+    last_index_attempt = get_last_attempt_for_cc_pair(
+        cc_pair_id=cc_pair.id,
+        search_settings_id=search_settings_instance.id,
+        db_session=db_session,
+    )
+    all_recent_errored = is_in_repeated_error_state(
+        cc_pair_id=cc_pair.id,
+        search_settings_id=search_settings_instance.id,
+        db_session=db_session,
+    )
 
     # uncomment for debugging
     # task_logger.info(f"_should_index: "
@@ -358,6 +421,7 @@ def _should_index(
 
     # don't kick off indexing for `NOT_APPLICABLE` sources
     if connector.source == DocumentSource.NOT_APPLICABLE:
+        # print(f"Not indexing cc_pair={cc_pair.id}: NOT_APPLICABLE source")
         return False
 
     # User can still manually create single indexing attempts via the UI for the
@@ -367,27 +431,42 @@ def _should_index(
             search_settings_instance.status == IndexModelStatus.PRESENT
             and secondary_index_building
         ):
+            # print(
+            #     f"Not indexing cc_pair={cc_pair.id}: DISABLE_INDEX_UPDATE_ON_SWAP is True and secondary index building"
+            # )
             return False
 
     # When switching over models, always index at least once
     if search_settings_instance.status == IndexModelStatus.FUTURE:
-        if last_index:
+        if last_index_attempt:
             # No new index if the last index attempt succeeded
             # Once is enough. The model will never be able to swap otherwise.
-            if last_index.status == IndexingStatus.SUCCESS:
+            if last_index_attempt.status == IndexingStatus.SUCCESS:
+                # print(
+                #     f"Not indexing cc_pair={cc_pair.id}: FUTURE model with successful last index attempt={last_index.id}"
+                # )
                 return False
 
             # No new index if the last index attempt is waiting to start
-            if last_index.status == IndexingStatus.NOT_STARTED:
+            if last_index_attempt.status == IndexingStatus.NOT_STARTED:
+                # print(
+                #     f"Not indexing cc_pair={cc_pair.id}: FUTURE model with NOT_STARTED last index attempt={last_index.id}"
+                # )
                 return False
 
             # No new index if the last index attempt is running
-            if last_index.status == IndexingStatus.IN_PROGRESS:
+            if last_index_attempt.status == IndexingStatus.IN_PROGRESS:
+                # print(
+                #     f"Not indexing cc_pair={cc_pair.id}: FUTURE model with IN_PROGRESS last index attempt={last_index.id}"
+                # )
                 return False
         else:
             if (
                 connector.id == 0 or connector.source == DocumentSource.INGESTION_API
             ):  # Ingestion API
+                # print(
+                #     f"Not indexing cc_pair={cc_pair.id}: FUTURE model with Ingestion API source"
+                # )
                 return False
         return True
 
@@ -399,23 +478,40 @@ def _should_index(
         or connector.id == 0
         or connector.source == DocumentSource.INGESTION_API
     ):
+        # print(
+        #     f"Not indexing cc_pair={cc_pair.id}: Connector is paused or is Ingestion API"
+        # )
         return False
 
-    if search_settings_primary:
+    if search_settings_instance.status.is_current():
         if cc_pair.indexing_trigger is not None:
-            # if a manual indexing trigger is on the cc pair, honor it for primary search settings
+            # if a manual indexing trigger is on the cc pair, honor it for live search settings
             return True
 
     # if no attempt has ever occurred, we should index regardless of refresh_freq
-    if not last_index:
+    if not last_index_attempt:
         return True
 
     if connector.refresh_freq is None:
+        # print(f"Not indexing cc_pair={cc_pair.id}: refresh_freq is None")
         return False
 
+    # if in the "initial" phase, we should always try and kick-off indexing
+    # as soon as possible if there is no ongoing attempt. In other words,
+    # no delay UNLESS we're repeatedly failing to index.
+    if (
+        cc_pair.status == ConnectorCredentialPairStatus.INITIAL_INDEXING
+        and not all_recent_errored
+    ):
+        return True
+
     current_db_time = get_db_current_time(db_session)
-    time_since_index = current_db_time - last_index.time_updated
+    time_since_index = current_db_time - last_index_attempt.time_updated
     if time_since_index.total_seconds() < connector.refresh_freq:
+        # print(
+        #     f"Not indexing cc_pair={cc_pair.id}: Last index attempt={last_index_attempt.id} "
+        #     f"too recent ({time_since_index.total_seconds()}s < {connector.refresh_freq}s)"
+        # )
         return False
 
     return True
@@ -428,7 +524,7 @@ def try_creating_indexing_task(
     reindex: bool,
     db_session: Session,
     r: Redis,
-    tenant_id: str | None,
+    tenant_id: str,
 ) -> int | None:
     """Checks for any conditions that should block the indexing task from being
     created, then creates the task.
@@ -495,6 +591,13 @@ def try_creating_indexing_task(
 
         custom_task_id = redis_connector_index.generate_generator_task_id()
 
+        # Determine which queue to use based on whether this is a user file
+        queue = (
+            OnyxCeleryQueues.USER_FILES_INDEXING
+            if cc_pair.is_user_file
+            else OnyxCeleryQueues.CONNECTOR_INDEXING
+        )
+
         # when the task is sent, we have yet to finish setting up the fence
         # therefore, the task must contain code that blocks until the fence is ready
         result = celery_app.send_task(
@@ -505,7 +608,7 @@ def try_creating_indexing_task(
                 search_settings_id=search_settings.id,
                 tenant_id=tenant_id,
             ),
-            queue=OnyxCeleryQueues.CONNECTOR_INDEXING,
+            queue=queue,
             task_id=custom_task_id,
             priority=OnyxCeleryPriority.MEDIUM,
         )

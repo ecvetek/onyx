@@ -7,14 +7,9 @@ import React, {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import ReactMarkdown from "react-markdown";
 import { OnyxDocument, FilteredOnyxDocument } from "@/lib/search/interfaces";
 import remarkGfm from "remark-gfm";
@@ -44,16 +39,27 @@ import { ValidSources } from "@/lib/types";
 import { useMouseTracking } from "./hooks";
 import { SettingsContext } from "@/components/settings/SettingsProvider";
 import RegenerateOption from "../RegenerateOption";
-import { LlmOverride } from "@/lib/hooks";
+import { LlmDescriptor } from "@/lib/hooks";
 import { ContinueGenerating } from "./ContinueMessage";
 import { MemoizedAnchor, MemoizedParagraph } from "./MemoizedTextComponents";
 import { extractCodeText, preprocessLaTeX } from "./codeUtils";
+import { ThinkingBox } from "./thinkingBox/ThinkingBox";
+import {
+  hasCompletedThinkingTokens,
+  hasPartialThinkingTokens,
+  extractThinkingContent,
+  isThinkingComplete,
+  removeThinkingTokens,
+} from "../utils/thinkingTokens";
 
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import SubQuestionsDisplay from "./SubQuestionsDisplay";
 import { StatusRefinement } from "../Refinement";
+import { copyAll, handleCopy } from "./copyingUtils";
+import { ErrorBanner } from "./Resubmit";
+import { transformLinkUri } from "@/lib/utils";
 
 export const AgenticMessage = ({
   isStreamingQuestions,
@@ -88,7 +94,9 @@ export const AgenticMessage = ({
   secondLevelSubquestions,
   toggleDocDisplay,
   error,
+  resubmit,
 }: {
+  resubmit?: () => void;
   isStreamingQuestions: boolean;
   isGenerating: boolean;
   docSidebarToggled?: boolean;
@@ -117,7 +125,7 @@ export const AgenticMessage = ({
   isComplete?: boolean;
   handleFeedback?: (feedbackType: FeedbackType) => void;
   overriddenModel?: string;
-  regenerate?: (modelOverRide: LlmOverride) => Promise<void>;
+  regenerate?: (modelOverRide: LlmDescriptor) => Promise<void>;
   setPresentingDocument?: (document: OnyxDocument) => void;
   toggleDocDisplay?: (agentic: boolean) => void;
   error?: string | null;
@@ -135,6 +143,14 @@ export const AgenticMessage = ({
     if (typeof incoming !== "string") return incoming;
 
     let processed = incoming;
+
+    // Apply thinking tokens processing first
+    if (
+      hasCompletedThinkingTokens(processed) ||
+      hasPartialThinkingTokens(processed)
+    ) {
+      processed = removeThinkingTokens(processed) as string;
+    }
 
     const codeBlockRegex = /```(\w*)\n[\s\S]*?```|```[\s\S]*?$/g;
     const matches = processed.match(codeBlockRegex);
@@ -173,10 +189,34 @@ export const AgenticMessage = ({
   const finalContent = processContent(content) as string;
   const finalAlternativeContent = processContent(alternativeContent) as string;
 
+  // Check if content contains thinking tokens
+  const hasThinkingTokens = useMemo(() => {
+    return (
+      hasCompletedThinkingTokens(content) || hasPartialThinkingTokens(content)
+    );
+  }, [content]);
+
+  // Extract thinking content
+  const thinkingContent = useMemo(() => {
+    if (!hasThinkingTokens) return "";
+    return extractThinkingContent(content);
+  }, [content, hasThinkingTokens]);
+
+  // Track if thinking is complete
+  const isThinkingTokenComplete = useMemo(() => {
+    return isThinkingComplete(thinkingContent);
+  }, [thinkingContent]);
+
+  // Enable streaming when thinking tokens are detected
+  useEffect(() => {
+    if (hasThinkingTokens) {
+      setAllowStreaming(true);
+    }
+  }, [hasThinkingTokens]);
+
   const [isViewingInitialAnswer, setIsViewingInitialAnswer] = useState(true);
 
   const [canShowResponse, setCanShowResponse] = useState(isComplete);
-  const [isRegenerateHovered, setIsRegenerateHovered] = useState(false);
   const [isRegenerateDropdownVisible, setIsRegenerateDropdownVisible] =
     useState(false);
 
@@ -280,6 +320,7 @@ export const AgenticMessage = ({
           ...(secondLevelSubquestions || []),
         ]}
         openQuestion={openQuestion}
+        href={props.href}
       >
         {props.children}
       </MemoizedAnchor>
@@ -311,6 +352,8 @@ export const AgenticMessage = ({
     [anchorCallback, paragraphCallback, streamedContent]
   );
 
+  const markdownRef = useRef<HTMLDivElement>(null);
+
   const renderedAlternativeMarkdown = useMemo(() => {
     return (
       <ReactMarkdown
@@ -332,6 +375,7 @@ export const AgenticMessage = ({
         }}
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[[rehypePrism, { ignoreMissing: true }], rehypeKatex]}
+        urlTransform={transformLinkUri}
       >
         {finalAlternativeContent}
       </ReactMarkdown>
@@ -345,6 +389,7 @@ export const AgenticMessage = ({
         components={markdownComponents}
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[[rehypePrism, { ignoreMissing: true }], rehypeKatex]}
+        urlTransform={transformLinkUri}
       >
         {streamedContent +
           (!isComplete && !secondLevelGenerating ? " [*]() " : "")}
@@ -448,6 +493,16 @@ export const AgenticMessage = ({
                       unToggle={false}
                     />
                   )}
+                  {/* Render thinking box if thinking tokens exist */}
+                  {hasThinkingTokens && thinkingContent && (
+                    <div className="mb-2 mt-1">
+                      <ThinkingBox
+                        content={thinkingContent}
+                        isComplete={isComplete || false}
+                        isStreaming={!isThinkingTokenComplete || !isComplete}
+                      />
+                    </div>
+                  )}
                   {/* For debugging purposes */}
                   {/* <SubQuestionProgress subQuestions={subQuestions || []} /> */}
                   {/*  */}
@@ -456,7 +511,6 @@ export const AgenticMessage = ({
                     finalContent.length > 8) ||
                   (files && files.length > 0) ? (
                     <>
-                      {/* <FileDisplay files={files || []} /> */}
                       <div className="w-full  py-4 flex flex-col gap-4">
                         <div className="flex items-center gap-x-2 px-4">
                           <div className="text-black text-lg font-medium">
@@ -491,7 +545,11 @@ export const AgenticMessage = ({
 
                         <div className="px-4">
                           {typeof content === "string" ? (
-                            <div className="overflow-x-visible !text-sm max-w-content-max">
+                            <div
+                              onCopy={(e) => handleCopy(e, markdownRef)}
+                              ref={markdownRef}
+                              className="overflow-x-visible !text-sm max-w-content-max"
+                            >
                               {isViewingInitialAnswer
                                 ? renderedMarkdown
                                 : renderedAlternativeMarkdown}
@@ -500,9 +558,7 @@ export const AgenticMessage = ({
                             content
                           )}
                           {error && (
-                            <p className="mt-2 text-red-700 text-sm my-auto">
-                              {error}
-                            </p>
+                            <ErrorBanner error={error} resubmit={resubmit} />
                           )}
                         </div>
                       </div>
@@ -510,15 +566,13 @@ export const AgenticMessage = ({
                   ) : isComplete ? (
                     error && (
                       <p className="mt-2 mx-4 text-red-700 text-sm my-auto">
-                        {error}
+                        <ErrorBanner error={error} resubmit={resubmit} />
                       </p>
                     )
                   ) : (
                     <>
                       {error && (
-                        <p className="mt-2 mx-4 text-red-700 text-sm my-auto">
-                          {error}
-                        </p>
+                        <ErrorBanner error={error} resubmit={resubmit} />
                       )}
                     </>
                   )}
@@ -536,7 +590,6 @@ export const AgenticMessage = ({
                             {includeMessageSwitcher && (
                               <div className="-mx-1 mr-auto">
                                 <MessageSwitcher
-                                  disableForStreaming={!isComplete}
                                   currentPage={currentMessageInd + 1}
                                   totalPages={otherMessagesCanSwitchTo.length}
                                   handlePrevious={() => {
@@ -558,7 +611,16 @@ export const AgenticMessage = ({
                             )}
                           </div>
                           <CustomTooltip showTick line content="Copy">
-                            <CopyButton content={content.toString()} />
+                            <CopyButton
+                              copyAllFn={() =>
+                                copyAll(
+                                  (isViewingInitialAnswer
+                                    ? finalContent
+                                    : finalAlternativeContent) as string,
+                                  markdownRef
+                                )
+                              }
+                            />
                           </CustomTooltip>
                           <CustomTooltip showTick line content="Good response">
                             <HoverableIcon
@@ -583,7 +645,6 @@ export const AgenticMessage = ({
                                 onDropdownVisibleChange={
                                   setIsRegenerateDropdownVisible
                                 }
-                                onHoverChange={setIsRegenerateHovered}
                                 selectedAssistant={currentPersona!}
                                 regenerate={regenerate}
                                 overriddenModel={overriddenModel}
@@ -599,16 +660,10 @@ export const AgenticMessage = ({
                           absolute -bottom-5
                           z-10
                           invisible ${
-                            (isHovering ||
-                              isRegenerateHovered ||
-                              settings?.isMobile) &&
-                            "!visible"
+                            (isHovering || settings?.isMobile) && "!visible"
                           }
                           opacity-0 ${
-                            (isHovering ||
-                              isRegenerateHovered ||
-                              settings?.isMobile) &&
-                            "!opacity-100"
+                            (isHovering || settings?.isMobile) && "!opacity-100"
                           }
                           translate-y-2 ${
                             (isHovering || settings?.isMobile) &&
@@ -623,7 +678,6 @@ export const AgenticMessage = ({
                             {includeMessageSwitcher && (
                               <div className="-mx-1 mr-auto">
                                 <MessageSwitcher
-                                  disableForStreaming={!isComplete}
                                   currentPage={currentMessageInd + 1}
                                   totalPages={otherMessagesCanSwitchTo.length}
                                   handlePrevious={() => {
@@ -645,7 +699,16 @@ export const AgenticMessage = ({
                             )}
                           </div>
                           <CustomTooltip showTick line content="Copy">
-                            <CopyButton content={content.toString()} />
+                            <CopyButton
+                              copyAllFn={() =>
+                                copyAll(
+                                  (isViewingInitialAnswer
+                                    ? finalContent
+                                    : finalAlternativeContent) as string,
+                                  markdownRef
+                                )
+                              }
+                            />
                           </CustomTooltip>
 
                           <CustomTooltip showTick line content="Good response">
@@ -675,7 +738,6 @@ export const AgenticMessage = ({
                                 }
                                 regenerate={regenerate}
                                 overriddenModel={overriddenModel}
-                                onHoverChange={setIsRegenerateHovered}
                               />
                             </CustomTooltip>
                           )}
@@ -702,52 +764,27 @@ function MessageSwitcher({
   totalPages,
   handlePrevious,
   handleNext,
-  disableForStreaming,
 }: {
   currentPage: number;
   totalPages: number;
   handlePrevious: () => void;
   handleNext: () => void;
-  disableForStreaming?: boolean;
 }) {
   return (
     <div className="flex items-center text-sm space-x-0.5">
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <div>
-              <Hoverable
-                icon={FiChevronLeft}
-                onClick={currentPage === 1 ? undefined : handlePrevious}
-              />
-            </div>
-          </TooltipTrigger>
-          <TooltipContent>
-            {disableForStreaming ? "Disabled" : "Previous"}
-          </TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
+      <Hoverable
+        icon={FiChevronLeft}
+        onClick={currentPage === 1 ? undefined : handlePrevious}
+      />
 
       <span className="text-text-darker select-none">
         {currentPage} / {totalPages}
-        {disableForStreaming ? "Complete" : "Generating"}
       </span>
 
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <div>
-              <Hoverable
-                icon={FiChevronRight}
-                onClick={currentPage === totalPages ? undefined : handleNext}
-              />
-            </div>
-          </TooltipTrigger>
-          <TooltipContent>
-            {disableForStreaming ? "Disabled" : "Next"}
-          </TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
+      <Hoverable
+        icon={FiChevronRight}
+        onClick={currentPage === totalPages ? undefined : handleNext}
+      />
     </div>
   );
 }

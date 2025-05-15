@@ -6,6 +6,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from onyx.document_index.document_index_utils import get_multipass_config
+from shared_configs.configs import POSTGRES_DEFAULT_SCHEMA
 
 # makes it so `PYTHONPATH=.` is not required when running this script
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -15,6 +16,7 @@ from onyx.context.search.models import IndexFilters  # noqa: E402
 from onyx.document_index.interfaces import VespaChunkRequest  # noqa: E402
 from onyx.db.engine import get_session_context_manager  # noqa: E402
 from onyx.db.document import delete_documents_complete__no_commit  # noqa: E402
+from onyx.db.tag import delete_orphan_tags__no_commit  # noqa: E402
 from onyx.db.search_settings import get_current_search_settings  # noqa: E402
 from onyx.document_index.vespa.index import VespaIndex  # noqa: E402
 from onyx.db.document import get_document  # noqa: E402
@@ -96,7 +98,9 @@ def main() -> None:
                     try:
                         print(f"Deleting document {doc_id} in Vespa")
                         chunks_deleted = vespa_index.delete_single(
-                            doc_id, tenant_id=None, chunk_count=document.chunk_count
+                            doc_id,
+                            tenant_id=POSTGRES_DEFAULT_SCHEMA,
+                            chunk_count=document.chunk_count,
                         )
                         if chunks_deleted > 0:
                             print(
@@ -125,6 +129,7 @@ def main() -> None:
                 delete_documents_complete__no_commit(
                     db_session, successfully_vespa_deleted_doc_ids
                 )
+                delete_orphan_tags__no_commit(db_session)
                 db_session.commit()
             except Exception as e:
                 print(f"Error deleting documents from Postgres: {e}")

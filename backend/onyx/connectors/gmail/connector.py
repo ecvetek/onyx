@@ -1,5 +1,6 @@
 from base64 import urlsafe_b64decode
 from typing import Any
+from typing import cast
 from typing import Dict
 
 from google.oauth2.credentials import Credentials as OAuthCredentials  # type: ignore
@@ -11,6 +12,7 @@ from onyx.configs.constants import DocumentSource
 from onyx.connectors.cross_connector_utils.miscellaneous_utils import time_str_to_utc
 from onyx.connectors.google_utils.google_auth import get_google_creds
 from onyx.connectors.google_utils.google_utils import execute_paginated_retrieval
+from onyx.connectors.google_utils.google_utils import execute_single_retrieval
 from onyx.connectors.google_utils.resources import get_admin_service
 from onyx.connectors.google_utils.resources import get_gmail_service
 from onyx.connectors.google_utils.shared_constants import (
@@ -28,8 +30,9 @@ from onyx.connectors.interfaces import SecondsSinceUnixEpoch
 from onyx.connectors.interfaces import SlimConnector
 from onyx.connectors.models import BasicExpertInfo
 from onyx.connectors.models import Document
-from onyx.connectors.models import Section
+from onyx.connectors.models import ImageSection
 from onyx.connectors.models import SlimDocument
+from onyx.connectors.models import TextSection
 from onyx.indexing.indexing_heartbeat import IndexingHeartbeatInterface
 from onyx.utils.logger import setup_logger
 from onyx.utils.retry_wrapper import retry_builder
@@ -115,7 +118,7 @@ def _get_message_body(payload: dict[str, Any]) -> str:
     return message_body
 
 
-def message_to_section(message: Dict[str, Any]) -> tuple[Section, dict[str, str]]:
+def message_to_section(message: Dict[str, Any]) -> tuple[TextSection, dict[str, str]]:
     link = f"https://mail.google.com/mail/u/0/#inbox/{message['id']}"
 
     payload = message.get("payload", {})
@@ -142,7 +145,7 @@ def message_to_section(message: Dict[str, Any]) -> tuple[Section, dict[str, str]
 
     message_body_text: str = _get_message_body(payload)
 
-    return Section(link=link, text=message_body_text + message_data), metadata
+    return TextSection(link=link, text=message_body_text + message_data), metadata
 
 
 def thread_to_document(full_thread: Dict[str, Any]) -> Document | None:
@@ -192,7 +195,7 @@ def thread_to_document(full_thread: Dict[str, Any]) -> Document | None:
     return Document(
         id=id,
         semantic_identifier=semantic_identifier,
-        sections=sections,
+        sections=cast(list[TextSection | ImageSection], sections),
         source=DocumentSource.GMAIL,
         # This is used to perform permission sync
         primary_owners=primary_owners,
@@ -297,13 +300,15 @@ class GmailConnector(LoadConnector, PollConnector, SlimConnector):
                 userId=user_email,
                 fields=THREAD_LIST_FIELDS,
                 q=query,
+                continue_on_404_or_403=True,
             ):
-                full_threads = execute_paginated_retrieval(
+                full_threads = execute_single_retrieval(
                     retrieval_function=gmail_service.users().threads().get,
                     list_key=None,
                     userId=user_email,
                     fields=THREAD_FIELDS,
                     id=thread["id"],
+                    continue_on_404_or_403=True,
                 )
                 # full_threads is an iterator containing a single thread
                 # so we need to convert it to a list and grab the first element
@@ -335,6 +340,7 @@ class GmailConnector(LoadConnector, PollConnector, SlimConnector):
                 userId=user_email,
                 fields=THREAD_LIST_FIELDS,
                 q=query,
+                continue_on_404_or_403=True,
             ):
                 doc_batch.append(
                     SlimDocument(

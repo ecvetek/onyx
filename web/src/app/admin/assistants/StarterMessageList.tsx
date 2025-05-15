@@ -1,14 +1,14 @@
 "use client";
 
-import { ArrayHelpers, ErrorMessage, Field, useFormikContext } from "formik";
+import { ArrayHelpers } from "formik";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { useEffect, useState } from "react";
-import { FiTrash2, FiRefreshCcw, FiRefreshCw } from "react-icons/fi";
+import { useState } from "react";
+import { FiTrash2, FiRefreshCw } from "react-icons/fi";
 import { StarterMessage } from "./interfaces";
 import { Button } from "@/components/ui/button";
 import { SwapIcon } from "@/components/icons/icons";
@@ -52,7 +52,6 @@ export default function StarterMessagesList({
           <TextFormField
             name={`starter_messages.${index}.message`}
             label=""
-            value={starterMessage.message}
             onChange={(e) => handleInputChange(index, e.target.value)}
             className="flex-grow"
             removeLabel

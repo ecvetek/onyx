@@ -1,7 +1,9 @@
 import logging
 import multiprocessing
+import os
 import time
 from typing import Any
+from typing import cast
 
 import sentry_sdk
 from celery import Task
@@ -58,13 +60,35 @@ else:
     logger.debug("Sentry DSN not provided, skipping Sentry initialization")
 
 
+class TenantAwareTask(Task):
+    """A custom base Task that sets tenant_id in a contextvar before running."""
+
+    abstract = True  # So Celery knows not to register this as a real task.
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        # Grab tenant_id from the kwargs, or fallback to default if missing.
+        tenant_id = kwargs.get("tenant_id", None) or POSTGRES_DEFAULT_SCHEMA
+
+        # Set the context var
+        CURRENT_TENANT_ID_CONTEXTVAR.set(tenant_id)
+
+        # Actually run the task now
+        try:
+            return super().__call__(*args, **kwargs)
+        finally:
+            # Clear or reset after the task runs
+            # so it does not leak into any subsequent tasks on the same worker process
+            CURRENT_TENANT_ID_CONTEXTVAR.set(None)
+
+
+@task_prerun.connect
 def on_task_prerun(
     sender: Any | None = None,
     task_id: str | None = None,
     task: Task | None = None,
     args: tuple[Any, ...] | None = None,
     kwargs: dict[str, Any] | None = None,
-    **kwds: Any,
+    **other_kwargs: Any,
 ) -> None:
     pass
 
@@ -108,9 +132,9 @@ def on_task_postrun(
     # Get tenant_id directly from kwargs- each celery task has a tenant_id kwarg
     if not kwargs:
         logger.error(f"Task {task.name} (ID: {task_id}) is missing kwargs")
-        tenant_id = None
+        tenant_id = POSTGRES_DEFAULT_SCHEMA
     else:
-        tenant_id = kwargs.get("tenant_id")
+        tenant_id = cast(str, kwargs.get("tenant_id", POSTGRES_DEFAULT_SCHEMA))
 
     task_logger.debug(
         f"Task {task.name} (ID: {task_id}) completed with state: {state} "
@@ -201,7 +225,7 @@ def wait_for_redis(sender: Any, **kwargs: Any) -> None:
     Will raise WorkerShutdown to kill the celery worker if the timeout
     is reached."""
 
-    r = get_redis_client(tenant_id=None)
+    r = get_redis_client(tenant_id=POSTGRES_DEFAULT_SCHEMA)
 
     WAIT_INTERVAL = 5
     WAIT_LIMIT = 60
@@ -282,12 +306,12 @@ def wait_for_db(sender: Any, **kwargs: Any) -> None:
 
 
 def on_secondary_worker_init(sender: Any, **kwargs: Any) -> None:
-    logger.info("Running as a secondary celery worker.")
+    logger.info(f"Running as a secondary celery worker: pid={os.getpid()}")
 
     # Set up variables for waiting on primary worker
     WAIT_INTERVAL = 5
     WAIT_LIMIT = 60
-    r = get_redis_client(tenant_id=None)
+    r = get_redis_client(tenant_id=POSTGRES_DEFAULT_SCHEMA)
     time_start = time.monotonic()
 
     logger.info("Waiting for primary worker to be ready...")
@@ -422,7 +446,6 @@ def set_task_finished_log_level(logLevel: int) -> None:
 
 
 class TenantContextFilter(logging.Filter):
-
     """Logging filter to inject tenant ID into the logger's name."""
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -437,24 +460,6 @@ class TenantContextFilter(logging.Filter):
         else:
             record.name = ""
         return True
-
-
-@task_prerun.connect
-def set_tenant_id(
-    sender: Any | None = None,
-    task_id: str | None = None,
-    task: Task | None = None,
-    args: tuple[Any, ...] | None = None,
-    kwargs: dict[str, Any] | None = None,
-    **other_kwargs: Any,
-) -> None:
-    """Signal handler to set tenant ID in context var before task starts."""
-    tenant_id = (
-        kwargs.get("tenant_id", POSTGRES_DEFAULT_SCHEMA)
-        if kwargs
-        else POSTGRES_DEFAULT_SCHEMA
-    )
-    CURRENT_TENANT_ID_CONTEXTVAR.set(tenant_id)
 
 
 @task_postrun.connect

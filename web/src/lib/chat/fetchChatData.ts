@@ -29,7 +29,6 @@ import {
   NEXT_PUBLIC_DEFAULT_SIDEBAR_OPEN,
   NEXT_PUBLIC_ENABLE_CHROME_EXTENSION,
 } from "../constants";
-import { redirect } from "next/navigation";
 
 interface FetchChatDataResult {
   user: User | null;
@@ -113,7 +112,24 @@ export async function fetchChatData(searchParams: {
       ? `${fullUrl}?${searchParamsString}`
       : fullUrl;
 
-    if (!NEXT_PUBLIC_ENABLE_CHROME_EXTENSION) {
+    // Check the referrer to prevent redirect loops
+    const referrer = headersList.get("referer") || "";
+    const isComingFromLogin = referrer.includes("/auth/login");
+
+    // Also check for the from=login query parameter
+    const isRedirectedFromLogin = searchParams["from"] === "login";
+
+    console.log(
+      `Auth check: authDisabled=${authDisabled}, user=${!!user}, referrer=${referrer}, fromLogin=${isRedirectedFromLogin}`
+    );
+
+    // Only redirect if we're not already coming from the login page
+    if (
+      !NEXT_PUBLIC_ENABLE_CHROME_EXTENSION &&
+      !isComingFromLogin &&
+      !isRedirectedFromLogin
+    ) {
+      console.log("Redirecting to login from chat page");
       return {
         redirect: `/auth/login?next=${encodeURIComponent(redirectUrl)}`,
       };
@@ -148,7 +164,7 @@ export async function fetchChatData(searchParams: {
 
   chatSessions.sort(
     (a, b) =>
-      new Date(b.time_created).getTime() - new Date(a.time_created).getTime()
+      new Date(b.time_updated).getTime() - new Date(a.time_updated).getTime()
   );
 
   let documentSets: DocumentSet[] = [];

@@ -9,15 +9,31 @@ import {
 import { UUID } from "crypto";
 
 export enum ConnectorCredentialPairStatus {
+  SCHEDULED = "SCHEDULED",
+  INITIAL_INDEXING = "INITIAL_INDEXING",
   ACTIVE = "ACTIVE",
   PAUSED = "PAUSED",
   DELETING = "DELETING",
+  INVALID = "INVALID",
+}
+
+/**
+ * Returns true if the status is not currently active (i.e. paused or invalid), but not deleting
+ */
+export function statusIsNotCurrentlyActive(
+  status: ConnectorCredentialPairStatus
+): boolean {
+  return (
+    status === ConnectorCredentialPairStatus.PAUSED ||
+    status === ConnectorCredentialPairStatus.INVALID
+  );
 }
 
 export interface CCPairFullInfo {
   id: number;
   name: string;
   status: ConnectorCredentialPairStatus;
+  in_repeated_error_state: boolean;
   num_docs_indexed: number;
   connector: Connector<any>;
   credential: Credential<any>;
@@ -30,6 +46,12 @@ export interface CCPairFullInfo {
   indexing: boolean;
   creator: UUID | null;
   creator_email: string | null;
+
+  last_indexed: string | null;
+  last_pruned: string | null;
+  last_full_permission_sync: string | null;
+  overall_indexing_speed: number | null;
+  latest_checkpoint_description: string | null;
 }
 
 export interface PaginatedIndexAttempts {

@@ -16,9 +16,11 @@ from typing import List
 from uuid import UUID
 
 import httpx  # type: ignore
+import jinja2
 import requests  # type: ignore
 from retry import retry
 
+from onyx.agents.agent_search.shared_graph_utils.models import QueryExpansionType
 from onyx.configs.chat_configs import DOC_TIME_DECAY
 from onyx.configs.chat_configs import NUM_RETURNED_HITS
 from onyx.configs.chat_configs import TITLE_CONTENT_RATIO
@@ -26,6 +28,7 @@ from onyx.configs.chat_configs import VESPA_SEARCHER_THREADS
 from onyx.configs.constants import KV_REINDEX_KEY
 from onyx.context.search.models import IndexFilters
 from onyx.context.search.models import InferenceChunkUncleaned
+from onyx.db.enums import EmbeddingPrecision
 from onyx.document_index.document_index_utils import get_document_chunk_ids
 from onyx.document_index.interfaces import DocumentIndex
 from onyx.document_index.interfaces import DocumentInsertionRecord
@@ -35,6 +38,7 @@ from onyx.document_index.interfaces import MinimalDocumentIndexingInfo
 from onyx.document_index.interfaces import UpdateRequest
 from onyx.document_index.interfaces import VespaChunkRequest
 from onyx.document_index.interfaces import VespaDocumentFields
+from onyx.document_index.interfaces import VespaDocumentUserFields
 from onyx.document_index.vespa.chunk_retrieval import batch_search_api_retrieval
 from onyx.document_index.vespa.chunk_retrieval import (
     parallel_visit_api_retrieval,
@@ -58,22 +62,17 @@ from onyx.document_index.vespa_constants import ACCESS_CONTROL_LIST
 from onyx.document_index.vespa_constants import BATCH_SIZE
 from onyx.document_index.vespa_constants import BOOST
 from onyx.document_index.vespa_constants import CONTENT_SUMMARY
-from onyx.document_index.vespa_constants import DANSWER_CHUNK_REPLACEMENT_PAT
-from onyx.document_index.vespa_constants import DATE_REPLACEMENT
 from onyx.document_index.vespa_constants import DOCUMENT_ID_ENDPOINT
-from onyx.document_index.vespa_constants import DOCUMENT_REPLACEMENT_PAT
 from onyx.document_index.vespa_constants import DOCUMENT_SETS
 from onyx.document_index.vespa_constants import HIDDEN
 from onyx.document_index.vespa_constants import NUM_THREADS
-from onyx.document_index.vespa_constants import SEARCH_THREAD_NUMBER_PAT
-from onyx.document_index.vespa_constants import TENANT_ID_PAT
-from onyx.document_index.vespa_constants import TENANT_ID_REPLACEMENT
+from onyx.document_index.vespa_constants import USER_FILE
+from onyx.document_index.vespa_constants import USER_FOLDER
 from onyx.document_index.vespa_constants import VESPA_APPLICATION_ENDPOINT
-from onyx.document_index.vespa_constants import VESPA_DIM_REPLACEMENT_PAT
 from onyx.document_index.vespa_constants import VESPA_TIMEOUT
 from onyx.document_index.vespa_constants import YQL_BASE
 from onyx.indexing.models import DocMetadataAwareIndexChunk
-from onyx.key_value_store.factory import get_kv_store
+from onyx.key_value_store.factory import get_shared_kv_store
 from onyx.utils.batching import batch_generator
 from onyx.utils.logger import setup_logger
 from shared_configs.configs import MULTI_TENANT
@@ -128,6 +127,9 @@ def add_ngrams_to_schema(schema_content: str) -> str:
 
 
 class VespaIndex(DocumentIndex):
+
+    VESPA_SCHEMA_JINJA_FILENAME = "danswer_chunk.sd.jinja"
+
     def __init__(
         self,
         index_name: str,
@@ -157,20 +159,24 @@ class VespaIndex(DocumentIndex):
         self.index_to_large_chunks_enabled: dict[str, bool] = {}
         self.index_to_large_chunks_enabled[index_name] = large_chunks_enabled
         if secondary_index_name and secondary_large_chunks_enabled:
-            self.index_to_large_chunks_enabled[
-                secondary_index_name
-            ] = secondary_large_chunks_enabled
+            self.index_to_large_chunks_enabled[secondary_index_name] = (
+                secondary_large_chunks_enabled
+            )
 
     def ensure_indices_exist(
         self,
-        index_embedding_dim: int,
+        primary_embedding_dim: int,
+        primary_embedding_precision: EmbeddingPrecision,
         secondary_index_embedding_dim: int | None,
+        secondary_index_embedding_precision: EmbeddingPrecision | None,
     ) -> None:
         if MULTI_TENANT:
             logger.info(
-                "Skipping Vespa index seup for multitenant (would wipe all indices)"
+                "Skipping Vespa index setup for multitenant (would wipe all indices)"
             )
             return None
+
+        jinja_env = jinja2.Environment()
 
         deploy_url = f"{VESPA_APPLICATION_ENDPOINT}/tenant/default/prepareandactivate"
         logger.notice(f"Deploying Vespa application package to {deploy_url}")
@@ -178,22 +184,26 @@ class VespaIndex(DocumentIndex):
         vespa_schema_path = os.path.join(
             os.getcwd(), "onyx", "document_index", "vespa", "app_config"
         )
-        schema_file = os.path.join(vespa_schema_path, "schemas", "danswer_chunk.sd")
-        services_file = os.path.join(vespa_schema_path, "services.xml")
-        overrides_file = os.path.join(vespa_schema_path, "validation-overrides.xml")
-
-        with open(services_file, "r") as services_f:
-            services_template = services_f.read()
-
-        schema_names = [self.index_name, self.secondary_index_name]
-
-        doc_lines = _create_document_xml_lines(schema_names)
-        services = services_template.replace(DOCUMENT_REPLACEMENT_PAT, doc_lines)
-        services = services.replace(
-            SEARCH_THREAD_NUMBER_PAT, str(VESPA_SEARCHER_THREADS)
+        schema_jinja_file = os.path.join(
+            vespa_schema_path, "schemas", VespaIndex.VESPA_SCHEMA_JINJA_FILENAME
+        )
+        services_jinja_file = os.path.join(vespa_schema_path, "services.xml.jinja")
+        overrides_jinja_file = os.path.join(
+            vespa_schema_path, "validation-overrides.xml.jinja"
         )
 
-        kv_store = get_kv_store()
+        with open(services_jinja_file, "r") as services_f:
+            schema_names = [self.index_name, self.secondary_index_name]
+            doc_lines = _create_document_xml_lines(schema_names)
+
+            services_template_str = services_f.read()
+            services_template = jinja_env.from_string(services_template_str)
+            services = services_template.render(
+                document_elements=doc_lines,
+                num_search_threads=str(VESPA_SEARCHER_THREADS),
+            )
+
+        kv_store = get_shared_kv_store()
 
         needs_reindexing = False
         try:
@@ -201,38 +211,51 @@ class VespaIndex(DocumentIndex):
         except Exception:
             logger.debug("Could not load the reindexing flag. Using ngrams")
 
-        with open(overrides_file, "r") as overrides_f:
-            overrides_template = overrides_f.read()
-
         # Vespa requires an override to erase data including the indices we're no longer using
         # It also has a 30 day cap from current so we set it to 7 dynamically
-        now = datetime.now()
-        date_in_7_days = now + timedelta(days=7)
-        formatted_date = date_in_7_days.strftime("%Y-%m-%d")
+        with open(overrides_jinja_file, "r") as overrides_f:
+            overrides_template_str = overrides_f.read()
+            overrides_template = jinja_env.from_string(overrides_template_str)
 
-        overrides = overrides_template.replace(DATE_REPLACEMENT, formatted_date)
+            now = datetime.now()
+            date_in_7_days = now + timedelta(days=7)
+            formatted_date = date_in_7_days.strftime("%Y-%m-%d")
+            overrides = overrides_template.render(
+                until_date=formatted_date,
+            )
 
         zip_dict = {
             "services.xml": services.encode("utf-8"),
             "validation-overrides.xml": overrides.encode("utf-8"),
         }
 
-        with open(schema_file, "r") as schema_f:
-            schema_template = schema_f.read()
-        schema_template = schema_template.replace(TENANT_ID_PAT, "")
+        with open(schema_jinja_file, "r") as schema_f:
+            template_str = schema_f.read()
 
-        schema = schema_template.replace(
-            DANSWER_CHUNK_REPLACEMENT_PAT, self.index_name
-        ).replace(VESPA_DIM_REPLACEMENT_PAT, str(index_embedding_dim))
+        template = jinja_env.from_string(template_str)
+        schema = template.render(
+            multi_tenant=MULTI_TENANT,
+            schema_name=self.index_name,
+            dim=primary_embedding_dim,
+            embedding_precision=primary_embedding_precision.value,
+        )
 
         schema = add_ngrams_to_schema(schema) if needs_reindexing else schema
-        schema = schema.replace(TENANT_ID_PAT, "")
         zip_dict[f"schemas/{schema_names[0]}.sd"] = schema.encode("utf-8")
 
         if self.secondary_index_name:
-            upcoming_schema = schema_template.replace(
-                DANSWER_CHUNK_REPLACEMENT_PAT, self.secondary_index_name
-            ).replace(VESPA_DIM_REPLACEMENT_PAT, str(secondary_index_embedding_dim))
+            if secondary_index_embedding_dim is None:
+                raise ValueError("Secondary index embedding dimension is required")
+            if secondary_index_embedding_precision is None:
+                raise ValueError("Secondary index embedding precision is required")
+
+            upcoming_schema = template.render(
+                multi_tenant=MULTI_TENANT,
+                schema_name=self.secondary_index_name,
+                dim=secondary_index_embedding_dim,
+                embedding_precision=secondary_index_embedding_precision.value,
+            )
+
             zip_dict[f"schemas/{schema_names[1]}.sd"] = upcoming_schema.encode("utf-8")
 
         zip_file = in_memory_zip_from_file_bytes(zip_dict)
@@ -240,6 +263,9 @@ class VespaIndex(DocumentIndex):
         headers = {"Content-Type": "application/zip"}
         response = requests.post(deploy_url, headers=headers, data=zip_file)
         if response.status_code != 200:
+            logger.error(
+                f"Failed to prepare Vespa Onyx Index. Response: {response.text}"
+            )
             raise RuntimeError(
                 f"Failed to prepare Vespa Onyx Index. Response: {response.text}"
             )
@@ -248,6 +274,7 @@ class VespaIndex(DocumentIndex):
     def register_multitenant_indices(
         indices: list[str],
         embedding_dims: list[int],
+        embedding_precisions: list[EmbeddingPrecision],
     ) -> None:
         if not MULTI_TENANT:
             raise ValueError("Multi-tenant is not enabled")
@@ -258,26 +285,29 @@ class VespaIndex(DocumentIndex):
         vespa_schema_path = os.path.join(
             os.getcwd(), "onyx", "document_index", "vespa", "app_config"
         )
-        schema_file = os.path.join(vespa_schema_path, "schemas", "danswer_chunk.sd")
-        services_file = os.path.join(vespa_schema_path, "services.xml")
-        overrides_file = os.path.join(vespa_schema_path, "validation-overrides.xml")
-
-        with open(services_file, "r") as services_f:
-            services_template = services_f.read()
-
-        # Generate schema names from index settings
-        schema_names = [index_name for index_name in indices]
-
-        full_schemas = schema_names
-
-        doc_lines = _create_document_xml_lines(full_schemas)
-
-        services = services_template.replace(DOCUMENT_REPLACEMENT_PAT, doc_lines)
-        services = services.replace(
-            SEARCH_THREAD_NUMBER_PAT, str(VESPA_SEARCHER_THREADS)
+        schema_jinja_file = os.path.join(
+            vespa_schema_path, "schemas", VespaIndex.VESPA_SCHEMA_JINJA_FILENAME
+        )
+        services_jinja_file = os.path.join(vespa_schema_path, "services.xml.jinja")
+        overrides_jinja_file = os.path.join(
+            vespa_schema_path, "validation-overrides.xml.jinja"
         )
 
-        kv_store = get_kv_store()
+        jinja_env = jinja2.Environment()
+
+        # Generate schema names from index settings
+        with open(services_jinja_file, "r") as services_f:
+            schema_names = [index_name for index_name in indices]
+            doc_lines = _create_document_xml_lines(schema_names)
+
+            services_template_str = services_f.read()
+            services_template = jinja_env.from_string(services_template_str)
+            services = services_template.render(
+                document_elements=doc_lines,
+                num_search_threads=str(VESPA_SEARCHER_THREADS),
+            )
+
+        kv_store = get_shared_kv_store()
 
         needs_reindexing = False
         try:
@@ -285,37 +315,43 @@ class VespaIndex(DocumentIndex):
         except Exception:
             logger.debug("Could not load the reindexing flag. Using ngrams")
 
-        with open(overrides_file, "r") as overrides_f:
-            overrides_template = overrides_f.read()
-
         # Vespa requires an override to erase data including the indices we're no longer using
         # It also has a 30 day cap from current so we set it to 7 dynamically
-        now = datetime.now()
-        date_in_7_days = now + timedelta(days=7)
-        formatted_date = date_in_7_days.strftime("%Y-%m-%d")
+        with open(overrides_jinja_file, "r") as overrides_f:
+            overrides_template_str = overrides_f.read()
+            overrides_template = jinja_env.from_string(overrides_template_str)
 
-        overrides = overrides_template.replace(DATE_REPLACEMENT, formatted_date)
+            now = datetime.now()
+            date_in_7_days = now + timedelta(days=7)
+            formatted_date = date_in_7_days.strftime("%Y-%m-%d")
+            overrides = overrides_template.render(
+                until_date=formatted_date,
+            )
 
         zip_dict = {
             "services.xml": services.encode("utf-8"),
             "validation-overrides.xml": overrides.encode("utf-8"),
         }
 
-        with open(schema_file, "r") as schema_f:
-            schema_template = schema_f.read()
+        with open(schema_jinja_file, "r") as schema_f:
+            schema_template_str = schema_f.read()
+
+        schema_template = jinja_env.from_string(schema_template_str)
 
         for i, index_name in enumerate(indices):
             embedding_dim = embedding_dims[i]
+            embedding_precision = embedding_precisions[i]
             logger.info(
                 f"Creating index: {index_name} with embedding dimension: {embedding_dim}"
             )
 
-            schema = schema_template.replace(
-                DANSWER_CHUNK_REPLACEMENT_PAT, index_name
-            ).replace(VESPA_DIM_REPLACEMENT_PAT, str(embedding_dim))
-            schema = schema.replace(
-                TENANT_ID_PAT, TENANT_ID_REPLACEMENT if MULTI_TENANT else ""
+            schema = schema_template.render(
+                multi_tenant=MULTI_TENANT,
+                schema_name=index_name,
+                dim=embedding_dim,
+                embedding_precision=embedding_precision.value,
             )
+
             schema = add_ngrams_to_schema(schema) if needs_reindexing else schema
             zip_dict[f"schemas/{index_name}.sd"] = schema.encode("utf-8")
 
@@ -351,9 +387,9 @@ class VespaIndex(DocumentIndex):
         new_document_id_to_original_document_id: dict[str, str] = {}
         for ind, chunk in enumerate(cleaned_chunks):
             old_chunk = chunks[ind]
-            new_document_id_to_original_document_id[
-                chunk.source_document.id
-            ] = old_chunk.source_document.id
+            new_document_id_to_original_document_id[chunk.source_document.id] = (
+                old_chunk.source_document.id
+            )
 
         existing_docs: set[str] = set()
 
@@ -465,9 +501,7 @@ class VespaIndex(DocumentIndex):
                         failure_msg = f"Failed to update document: {future_to_document_id[future]}"
                         raise requests.HTTPError(failure_msg) from e
 
-    def update(
-        self, update_requests: list[UpdateRequest], *, tenant_id: str | None
-    ) -> None:
+    def update(self, update_requests: list[UpdateRequest], *, tenant_id: str) -> None:
         logger.debug(f"Updating {len(update_requests)} documents in Vespa")
 
         # Handle Vespa character limitations
@@ -559,7 +593,8 @@ class VespaIndex(DocumentIndex):
         self,
         doc_chunk_id: UUID,
         index_name: str,
-        fields: VespaDocumentFields,
+        fields: VespaDocumentFields | None,
+        user_fields: VespaDocumentUserFields | None,
         doc_id: str,
         http_client: httpx.Client,
     ) -> None:
@@ -570,21 +605,31 @@ class VespaIndex(DocumentIndex):
 
         update_dict: dict[str, dict] = {"fields": {}}
 
-        if fields.boost is not None:
-            update_dict["fields"][BOOST] = {"assign": fields.boost}
+        if fields is not None:
+            if fields.boost is not None:
+                update_dict["fields"][BOOST] = {"assign": fields.boost}
 
-        if fields.document_sets is not None:
-            update_dict["fields"][DOCUMENT_SETS] = {
-                "assign": {document_set: 1 for document_set in fields.document_sets}
-            }
+            if fields.document_sets is not None:
+                update_dict["fields"][DOCUMENT_SETS] = {
+                    "assign": {document_set: 1 for document_set in fields.document_sets}
+                }
 
-        if fields.access is not None:
-            update_dict["fields"][ACCESS_CONTROL_LIST] = {
-                "assign": {acl_entry: 1 for acl_entry in fields.access.to_acl()}
-            }
+            if fields.access is not None:
+                update_dict["fields"][ACCESS_CONTROL_LIST] = {
+                    "assign": {acl_entry: 1 for acl_entry in fields.access.to_acl()}
+                }
 
-        if fields.hidden is not None:
-            update_dict["fields"][HIDDEN] = {"assign": fields.hidden}
+            if fields.hidden is not None:
+                update_dict["fields"][HIDDEN] = {"assign": fields.hidden}
+
+        if user_fields is not None:
+            if user_fields.user_file_id is not None:
+                update_dict["fields"][USER_FILE] = {"assign": user_fields.user_file_id}
+
+            if user_fields.user_folder_id is not None:
+                update_dict["fields"][USER_FOLDER] = {
+                    "assign": user_fields.user_folder_id
+                }
 
         if not update_dict["fields"]:
             logger.error("Update request received but nothing to update.")
@@ -615,8 +660,9 @@ class VespaIndex(DocumentIndex):
         doc_id: str,
         *,
         chunk_count: int | None,
-        tenant_id: str | None,
-        fields: VespaDocumentFields,
+        tenant_id: str,
+        fields: VespaDocumentFields | None,
+        user_fields: VespaDocumentUserFields | None,
     ) -> int:
         """Note: if the document id does not exist, the update will be a no-op and the
         function will complete with no errors or exceptions.
@@ -649,7 +695,12 @@ class VespaIndex(DocumentIndex):
 
                 for doc_chunk_id in doc_chunk_ids:
                     self._update_single_chunk(
-                        doc_chunk_id, index_name, fields, doc_id, httpx_client
+                        doc_chunk_id,
+                        index_name,
+                        fields,
+                        user_fields,
+                        doc_id,
+                        httpx_client,
                     )
 
         return doc_chunk_count
@@ -658,7 +709,7 @@ class VespaIndex(DocumentIndex):
         self,
         doc_id: str,
         *,
-        tenant_id: str | None,
+        tenant_id: str,
         chunk_count: int | None,
     ) -> int:
         total_chunks_deleted = 0
@@ -671,9 +722,10 @@ class VespaIndex(DocumentIndex):
         if self.secondary_index_name:
             index_names.append(self.secondary_index_name)
 
-        with self.httpx_client_context as http_client, concurrent.futures.ThreadPoolExecutor(
-            max_workers=NUM_THREADS
-        ) as executor:
+        with (
+            self.httpx_client_context as http_client,
+            concurrent.futures.ThreadPoolExecutor(max_workers=NUM_THREADS) as executor,
+        ):
             for (
                 index_name,
                 large_chunks_enabled,
@@ -690,6 +742,7 @@ class VespaIndex(DocumentIndex):
                     tenant_id=tenant_id,
                     large_chunks_enabled=large_chunks_enabled,
                 )
+
                 for doc_chunk_ids_batch in batch_generator(
                     chunks_to_delete, BATCH_SIZE
                 ):
@@ -745,12 +798,14 @@ class VespaIndex(DocumentIndex):
         hybrid_alpha: float,
         time_decay_multiplier: float,
         num_to_retrieve: int,
+        ranking_profile_type: QueryExpansionType,
         offset: int = 0,
         title_content_ratio: float | None = TITLE_CONTENT_RATIO,
     ) -> list[InferenceChunkUncleaned]:
         vespa_where_clauses = build_vespa_filters(filters)
         # Needs to be at least as much as the value set in Vespa schema config
         target_hits = max(10 * num_to_retrieve, 1000)
+
         yql = (
             YQL_BASE.format(index_name=self.index_name)
             + vespa_where_clauses
@@ -762,6 +817,13 @@ class VespaIndex(DocumentIndex):
 
         final_query = " ".join(final_keywords) if final_keywords else query
 
+        if ranking_profile_type == QueryExpansionType.KEYWORD:
+            ranking_profile = f"hybrid_search_keyword_base_{len(query_embedding)}"
+        else:
+            ranking_profile = f"hybrid_search_semantic_base_{len(query_embedding)}"
+
+        logger.info(f"Selected ranking profile: {ranking_profile}")
+
         logger.debug(f"Query YQL: {yql}")
 
         params: dict[str, str | int | float] = {
@@ -770,12 +832,14 @@ class VespaIndex(DocumentIndex):
             "input.query(query_embedding)": str(query_embedding),
             "input.query(decay_factor)": str(DOC_TIME_DECAY * time_decay_multiplier),
             "input.query(alpha)": hybrid_alpha,
-            "input.query(title_content_ratio)": title_content_ratio
-            if title_content_ratio is not None
-            else TITLE_CONTENT_RATIO,
+            "input.query(title_content_ratio)": (
+                title_content_ratio
+                if title_content_ratio is not None
+                else TITLE_CONTENT_RATIO
+            ),
             "hits": num_to_retrieve,
             "offset": offset,
-            "ranking.profile": f"hybrid_search{len(query_embedding)}",
+            "ranking.profile": ranking_profile,
             "timeout": VESPA_TIMEOUT,
         }
 

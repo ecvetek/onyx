@@ -10,28 +10,41 @@ import { SourceIcon } from "@/components/SourceIcon";
 import { WebResultIcon } from "@/components/WebResultIcon";
 import { SubQuestionDetail } from "../interfaces";
 import { ValidSources } from "@/lib/types";
-import { AnyNaptrRecord } from "dns";
+import { FileResponse } from "../my-documents/DocumentsContext";
 
 export const MemoizedAnchor = memo(
   ({
     docs,
     subQuestions,
     openQuestion,
+    userFiles,
+    href,
     updatePresentingDocument,
     children,
   }: {
     subQuestions?: SubQuestionDetail[];
     openQuestion?: (question: SubQuestionDetail) => void;
     docs?: OnyxDocument[] | null;
+    userFiles?: FileResponse[] | null;
     updatePresentingDocument: (doc: OnyxDocument) => void;
+    href?: string;
     children: React.ReactNode;
   }): JSX.Element => {
     const value = children?.toString();
     if (value?.startsWith("[") && value?.endsWith("]")) {
       const match = value.match(/\[(D|Q)?(\d+)\]/);
       if (match) {
-        const isSubQuestion = match[1] === "Q";
-        if (!isSubQuestion) {
+        const isUserFileCitation = userFiles?.length && userFiles.length > 0;
+        if (isUserFileCitation) {
+          const index = Math.min(
+            parseInt(match[2], 10) - 1,
+            userFiles?.length - 1
+          );
+          const associatedUserFile = userFiles?.[index];
+          if (!associatedUserFile) {
+            return <a href={children as string}>{children}</a>;
+          }
+        } else if (!isUserFileCitation) {
           const index = parseInt(match[2], 10) - 1;
           const associatedDoc = docs?.[index];
           if (!associatedDoc) {
@@ -41,7 +54,7 @@ export const MemoizedAnchor = memo(
           const index = parseInt(match[2], 10) - 1;
           const associatedSubQuestion = subQuestions?.[index];
           if (!associatedSubQuestion) {
-            return <a href={children as string}>{children}</a>;
+            return <a href={href || (children as string)}>{children}</a>;
           }
         }
       }
@@ -84,6 +97,7 @@ export const MemoizedAnchor = memo(
         return (
           <MemoizedLink
             updatePresentingDocument={updatePresentingDocument}
+            href={href}
             document={associatedDocInfo}
             question={associatedSubQuestion}
             openQuestion={openQuestion}
@@ -94,7 +108,10 @@ export const MemoizedAnchor = memo(
       }
     }
     return (
-      <MemoizedLink updatePresentingDocument={updatePresentingDocument}>
+      <MemoizedLink
+        updatePresentingDocument={updatePresentingDocument}
+        href={href}
+      >
         {children}
       </MemoizedLink>
     );
@@ -107,6 +124,7 @@ export const MemoizedLink = memo(
     document,
     updatePresentingDocument,
     question,
+    href,
     openQuestion,
     ...rest
   }: Partial<DocumentCardProps & QuestionCardProps> & {
@@ -153,9 +171,10 @@ export const MemoizedLink = memo(
     }
 
     const handleMouseDown = () => {
-      let url = rest.href || rest.children?.toString();
-      if (url && !url.startsWith("http://") && !url.startsWith("https://")) {
-        // Try to construct a valid URL
+      let url = href || rest.children?.toString();
+
+      if (url && !url.includes("://")) {
+        // Only add https:// if the URL doesn't already have a protocol
         const httpsUrl = `https://${url}`;
         try {
           new URL(httpsUrl);

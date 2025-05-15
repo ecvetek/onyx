@@ -17,7 +17,7 @@ from requests import JSONDecodeError
 
 from onyx.chat.prompt_builder.answer_prompt_builder import AnswerPromptBuilder
 from onyx.configs.constants import FileOrigin
-from onyx.db.engine import get_session_with_default_tenant
+from onyx.db.engine import get_session_with_current_tenant
 from onyx.file_store.file_store import get_default_file_store
 from onyx.file_store.models import ChatFileType
 from onyx.file_store.models import InMemoryChatFile
@@ -64,7 +64,7 @@ logger = setup_logger()
 CUSTOM_TOOL_RESPONSE_ID = "custom_tool_response"
 
 
-class CustomToolFileResponse(BaseModel):
+class CustomToolUserFileSnapshot(BaseModel):
     file_ids: List[str]  # References to saved images or CSVs
 
 
@@ -131,7 +131,7 @@ class CustomTool(BaseTool):
         response = cast(CustomToolCallSummary, args[0].response)
 
         if response.response_type == "image" or response.response_type == "csv":
-            image_response = cast(CustomToolFileResponse, response.tool_result)
+            image_response = cast(CustomToolUserFileSnapshot, response.tool_result)
             return json.dumps({"file_ids": image_response.file_ids})
 
         # For JSON or other responses, return as-is
@@ -205,7 +205,7 @@ class CustomTool(BaseTool):
     def _save_and_get_file_references(
         self, file_content: bytes | str, content_type: str
     ) -> List[str]:
-        with get_session_with_default_tenant() as db_session:
+        with get_session_with_current_tenant() as db_session:
             file_store = get_default_file_store(db_session)
 
             file_id = str(uuid.uuid4())
@@ -267,14 +267,14 @@ class CustomTool(BaseTool):
             file_ids = self._save_and_get_file_references(
                 response.content, content_type
             )
-            tool_result = CustomToolFileResponse(file_ids=file_ids)
+            tool_result = CustomToolUserFileSnapshot(file_ids=file_ids)
             response_type = "csv"
 
         elif "image/" in content_type:
             file_ids = self._save_and_get_file_references(
                 response.content, content_type
             )
-            tool_result = CustomToolFileResponse(file_ids=file_ids)
+            tool_result = CustomToolUserFileSnapshot(file_ids=file_ids)
             response_type = "image"
 
         else:
@@ -328,7 +328,7 @@ class CustomTool(BaseTool):
 
         # Load files from storage
         files = []
-        with get_session_with_default_tenant() as db_session:
+        with get_session_with_current_tenant() as db_session:
             file_store = get_default_file_store(db_session)
 
             for file_id in response.tool_result.file_ids:
@@ -358,7 +358,7 @@ class CustomTool(BaseTool):
 
     def final_result(self, *args: ToolResponse) -> JSON_ro:
         response = cast(CustomToolCallSummary, args[0].response)
-        if isinstance(response.tool_result, CustomToolFileResponse):
+        if isinstance(response.tool_result, CustomToolUserFileSnapshot):
             return response.tool_result.model_dump()
         return response.tool_result
 
