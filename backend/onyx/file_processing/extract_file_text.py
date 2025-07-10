@@ -2,7 +2,6 @@ import io
 import json
 import os
 import re
-import uuid
 import zipfile
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -15,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from typing import IO
 from typing import NamedTuple
+from zipfile import BadZipFile
 
 import chardet
 import docx  # type: ignore
@@ -28,6 +28,7 @@ from pypdf.errors import PdfStreamError
 
 from onyx.configs.constants import FileOrigin
 from onyx.configs.constants import ONYX_METADATA_FILENAME
+from onyx.configs.llm_configs import get_image_extraction_and_analysis_enabled
 from onyx.file_processing.html_utils import parse_html_page_basic
 from onyx.file_processing.unstructured import get_unstructured_api_key
 from onyx.file_processing.unstructured import unstructured_to_text
@@ -300,7 +301,7 @@ def read_pdf_file(
 
 
 def docx_to_text_and_images(
-    file: IO[Any],
+    file: IO[Any], file_name: str = ""
 ) -> tuple[str, Sequence[tuple[bytes, str]]]:
     """
     Extract text from a docx. If embed_images=True, also extract inline images.
@@ -309,7 +310,20 @@ def docx_to_text_and_images(
     paragraphs = []
     embedded_images: list[tuple[bytes, str]] = []
 
-    doc = docx.Document(file)
+    try:
+        doc = docx.Document(file)
+    except BadZipFile as e:
+        logger.warning(
+            f"Failed to extract docx {file_name or 'docx file'}: {e}. Attempting to read as text file."
+        )
+
+        # May be an invalid docx, but still a valid text file
+        file.seek(0)
+        encoding = detect_encoding(file)
+        text_content_raw, _ = read_text_file(
+            file, encoding=encoding, ignore_onyx_metadata=False
+        )
+        return text_content_raw or "", []
 
     # Grab text from paragraphs
     for paragraph in doc.paragraphs:
@@ -332,8 +346,13 @@ def docx_to_text_and_images(
     return text_content, embedded_images
 
 
-def pptx_to_text(file: IO[Any]) -> str:
-    presentation = pptx.Presentation(file)
+def pptx_to_text(file: IO[Any], file_name: str = "") -> str:
+    try:
+        presentation = pptx.Presentation(file)
+    except BadZipFile as e:
+        error_str = f"Failed to extract text from {file_name or 'pptx file'}: {e}"
+        logger.warning(error_str)
+        return ""
     text_content = []
     for slide_number, slide in enumerate(presentation.slides, start=1):
         slide_text = f"\nSlide {slide_number}:\n"
@@ -344,14 +363,45 @@ def pptx_to_text(file: IO[Any]) -> str:
     return TEXT_SECTION_SEPARATOR.join(text_content)
 
 
-def xlsx_to_text(file: IO[Any]) -> str:
-    workbook = openpyxl.load_workbook(file, read_only=True)
+def xlsx_to_text(file: IO[Any], file_name: str = "") -> str:
+    try:
+        workbook = openpyxl.load_workbook(file, read_only=True)
+    except BadZipFile as e:
+        error_str = f"Failed to extract text from {file_name or 'xlsx file'}: {e}"
+        if file_name.startswith("~"):
+            logger.debug(error_str + " (this is expected for files with ~)")
+        else:
+            logger.warning(error_str)
+        return ""
+    except Exception as e:
+        if "File contains no valid workbook part" in str(e):
+            logger.error(
+                f"Failed to extract text from {file_name or 'xlsx file'}. This happens due to a bug in openpyxl. {e}"
+            )
+            return ""
+        raise e
+
     text_content = []
     for sheet in workbook.worksheets:
         rows = []
+        num_empty_consecutive_rows = 0
         for row in sheet.iter_rows(min_row=1, values_only=True):
-            row_str = ",".join(str(cell) if cell is not None else "" for cell in row)
-            rows.append(row_str)
+            row_str = ",".join(str(cell or "") for cell in row)
+
+            # Only add the row if there are any values in the cells
+            if len(row_str) >= len(row):
+                rows.append(row_str)
+                num_empty_consecutive_rows = 0
+            else:
+                num_empty_consecutive_rows += 1
+
+            if num_empty_consecutive_rows > 100:
+                # handle massive excel sheets with mostly empty cells
+                logger.warning(
+                    f"Found {num_empty_consecutive_rows} empty rows in {file_name},"
+                    " skipping rest of file"
+                )
+                break
         sheet_str = "\n".join(rows)
         text_content.append(sheet_str)
     return TEXT_SECTION_SEPARATOR.join(text_content)
@@ -493,7 +543,9 @@ def extract_text_and_images(
         if extension == ".pdf":
             file.seek(0)
             text_content, pdf_metadata, images = read_pdf_file(
-                file, pdf_pass, extract_images=True
+                file,
+                pdf_pass,
+                extract_images=get_image_extraction_and_analysis_enabled(),
             )
             return ExtractionResult(
                 text_content=text_content, embedded_images=images, metadata=pdf_metadata
@@ -504,13 +556,17 @@ def extract_text_and_images(
         if extension == ".pptx":
             file.seek(0)
             return ExtractionResult(
-                text_content=pptx_to_text(file), embedded_images=[], metadata={}
+                text_content=pptx_to_text(file, file_name=file_name),
+                embedded_images=[],
+                metadata={},
             )
 
         if extension == ".xlsx":
             file.seek(0)
             return ExtractionResult(
-                text_content=xlsx_to_text(file), embedded_images=[], metadata={}
+                text_content=xlsx_to_text(file, file_name=file_name),
+                embedded_images=[],
+                metadata={},
             )
 
         if extension == ".eml":
@@ -568,15 +624,13 @@ def convert_docx_to_txt(file: UploadFile, file_store: FileStore) -> str:
     all_paras = [p.text for p in doc.paragraphs]
     text_content = "\n".join(all_paras)
 
-    text_file_name = docx_to_txt_filename(file.filename or f"docx_{uuid.uuid4()}")
-    file_store.save_file(
-        file_name=text_file_name,
+    file_id = file_store.save_file(
         content=BytesIO(text_content.encode("utf-8")),
         display_name=file.filename,
         file_origin=FileOrigin.CONNECTOR,
         file_type="text/plain",
     )
-    return text_file_name
+    return file_id
 
 
 def docx_to_txt_filename(file_path: str) -> str:

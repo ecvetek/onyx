@@ -35,6 +35,7 @@ def _build_connector(
 
 def test_gdrive_perm_sync_with_real_data(
     google_drive_service_acct_connector_factory: Callable[..., GoogleDriveConnector],
+    set_ee_on: None,
 ) -> None:
     """
     Test gdrive_doc_sync and gdrive_group_sync with real data from the test drive.
@@ -73,16 +74,17 @@ def test_gdrive_perm_sync_with_real_data(
         doc_access_generator = gdrive_doc_sync(mock_cc_pair, lambda: [], mock_heartbeat)
         doc_access_list = list(doc_access_generator)
 
+    # Verify we got some results
+    assert len(doc_access_list) > 0
+    print(f"Found {len(doc_access_list)} documents with permissions")
+
     # create new connector
     with patch(
         "ee.onyx.external_permissions.google_drive.group_sync.GoogleDriveConnector",
         return_value=_build_connector(google_drive_service_acct_connector_factory),
     ):
-        external_user_groups = gdrive_group_sync("test_tenant", mock_cc_pair)
-
-    # Verify we got some results
-    assert len(doc_access_list) > 0
-    print(f"Found {len(doc_access_list)} documents with permissions")
+        external_user_group_generator = gdrive_group_sync("test_tenant", mock_cc_pair)
+        external_user_groups = list(external_user_group_generator)
 
     # map group ids to emails
     group_id_to_email_mapping: dict[str, set[str]] = defaultdict(set)
@@ -153,5 +155,22 @@ def test_gdrive_perm_sync_with_real_data(
                 f"File {doc_id} (ID: {file_numeric_id}) should be accessible to users {expected_users} "
                 f"but is accessible to {emails_with_access}. Raw result: {doc_to_raw_result_mapping[doc_id]} "
             )
+
+    # Verify that we checked every file in ACCESS_MAPPING
+    all_expected_files = set()
+    for file_ids in ACCESS_MAPPING.values():
+        all_expected_files.update(file_ids)
+
+    checked_file_ids = {
+        url_to_id_mapping[doc_id]
+        for doc_id in doc_to_email_mapping
+        if doc_id in url_to_id_mapping
+    }
+
+    assert all_expected_files == checked_file_ids, (
+        f"Not all expected files were checked. "
+        f"Missing files: {all_expected_files - checked_file_ids}, "
+        f"Extra files checked: {checked_file_ids - all_expected_files}"
+    )
 
     print(f"Checked permissions for {checked_files} files from drive_id_mapping.json")

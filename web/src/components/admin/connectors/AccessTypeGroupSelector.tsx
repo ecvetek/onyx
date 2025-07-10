@@ -50,12 +50,16 @@ export function AccessTypeGroupSelector({
         access_type_helpers.setValue("public");
         return;
       }
-      if (!isUserAdmin && !isAutoSyncSupported) {
+
+      // Only set default access type if it's not already set, to avoid overriding user selections
+      if (!access_type.value && !isUserAdmin && !isAutoSyncSupported) {
         access_type_helpers.setValue("private");
       }
+
       if (
         access_type.value === "private" &&
         userGroups.length === 1 &&
+        userGroups[0] !== undefined &&
         !isUserAdmin
       ) {
         groups_helpers.setValue([userGroups[0].id]);
@@ -75,6 +79,7 @@ export function AccessTypeGroupSelector({
     access_type_helpers,
     groups_helpers,
     isPaidEnterpriseFeaturesEnabled,
+    isAutoSyncSupported,
   ]);
 
   if (userGroupsIsLoading) {
@@ -87,7 +92,7 @@ export function AccessTypeGroupSelector({
   if (shouldHideContent) {
     return (
       <>
-        {userGroups && (
+        {userGroups && userGroups[0] !== undefined && (
           <div className="mb-1 font-medium text-base">
             This Connector will be assigned to group <b>{userGroups[0].name}</b>
             .

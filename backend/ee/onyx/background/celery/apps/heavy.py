@@ -1,15 +1,12 @@
 import csv
 import io
 from datetime import datetime
-from datetime import timezone
 
 from celery import shared_task
 from celery import Task
 
-from ee.onyx.background.task_name_builders import query_history_task_name
 from ee.onyx.server.query_history.api import fetch_and_process_chat_session_history
 from ee.onyx.server.query_history.api import ONYX_ANONYMIZED_EMAIL
-from ee.onyx.server.query_history.models import ChatSessionSnapshot
 from ee.onyx.server.query_history.models import QuestionAnswerPairSnapshot
 from onyx.background.celery.apps.heavy import celery_app
 from onyx.background.task_utils import construct_query_history_report_name
@@ -19,11 +16,10 @@ from onyx.configs.constants import FileOrigin
 from onyx.configs.constants import FileType
 from onyx.configs.constants import OnyxCeleryTask
 from onyx.configs.constants import QueryHistoryType
-from onyx.db.engine import get_session_with_current_tenant
-from onyx.db.enums import TaskStatus
+from onyx.db.engine.sql_engine import get_session_with_current_tenant
 from onyx.db.tasks import delete_task_with_id
 from onyx.db.tasks import mark_task_as_finished_with_id
-from onyx.db.tasks import register_task
+from onyx.db.tasks import mark_task_as_started_with_id
 from onyx.file_store.file_store import get_default_file_store
 from onyx.utils.logger import setup_logger
 
@@ -38,32 +34,50 @@ logger = setup_logger()
     bind=True,
     trail=False,
 )
-def export_query_history_task(self: Task, *, start: datetime, end: datetime) -> None:
+def export_query_history_task(
+    self: Task,
+    *,
+    start: datetime,
+    end: datetime,
+    start_time: datetime,
+    # Need to include the tenant_id since the TenantAwareTask needs this
+    tenant_id: str,
+) -> None:
     if not self.request.id:
         raise RuntimeError("No task id defined for this task; cannot identify it")
 
     task_id = self.request.id
-    start_time = datetime.now(tz=timezone.utc)
+    stream = io.StringIO()
+    writer = csv.DictWriter(
+        stream,
+        fieldnames=list(QuestionAnswerPairSnapshot.model_fields.keys()),
+    )
+    writer.writeheader()
 
     with get_session_with_current_tenant() as db_session:
         try:
-            register_task(
+            mark_task_as_started_with_id(
                 db_session=db_session,
-                task_name=query_history_task_name(start=start, end=end),
                 task_id=task_id,
-                status=TaskStatus.STARTED,
-                start_time=start_time,
             )
 
-            complete_chat_session_history: list[ChatSessionSnapshot] = (
-                fetch_and_process_chat_session_history(
-                    db_session=db_session,
-                    start=start,
-                    end=end,
-                    feedback_type=None,
-                    limit=None,
-                )
+            snapshot_generator = fetch_and_process_chat_session_history(
+                db_session=db_session,
+                start=start,
+                end=end,
             )
+
+            for snapshot in snapshot_generator:
+                if ONYX_QUERY_HISTORY_TYPE == QueryHistoryType.ANONYMIZED:
+                    snapshot.user_email = ONYX_ANONYMIZED_EMAIL
+
+                writer.writerows(
+                    qa_pair.to_json()
+                    for qa_pair in QuestionAnswerPairSnapshot.from_chat_session_snapshot(
+                        snapshot
+                    )
+                )
+
         except Exception:
             logger.exception(f"Failed to export query history with {task_id=}")
             mark_task_as_finished_with_id(
@@ -73,37 +87,11 @@ def export_query_history_task(self: Task, *, start: datetime, end: datetime) -> 
             )
             raise
 
-    if ONYX_QUERY_HISTORY_TYPE == QueryHistoryType.ANONYMIZED:
-        complete_chat_session_history = [
-            ChatSessionSnapshot(
-                **chat_session_snapshot.model_dump(), user_email=ONYX_ANONYMIZED_EMAIL
-            )
-            for chat_session_snapshot in complete_chat_session_history
-        ]
-
-    qa_pairs: list[QuestionAnswerPairSnapshot] = [
-        qa_pair
-        for chat_session_snapshot in complete_chat_session_history
-        for qa_pair in QuestionAnswerPairSnapshot.from_chat_session_snapshot(
-            chat_session_snapshot
-        )
-    ]
-
-    stream = io.StringIO()
-    writer = csv.DictWriter(
-        stream,
-        fieldnames=list(QuestionAnswerPairSnapshot.model_fields.keys()),
-    )
-    writer.writeheader()
-    for row in qa_pairs:
-        writer.writerow(row.to_json())
-
     report_name = construct_query_history_report_name(task_id)
     with get_session_with_current_tenant() as db_session:
         try:
             stream.seek(0)
             get_default_file_store(db_session).save_file(
-                file_name=report_name,
                 content=stream,
                 display_name=report_name,
                 file_origin=FileOrigin.QUERY_HISTORY_CSV,
@@ -113,6 +101,7 @@ def export_query_history_task(self: Task, *, start: datetime, end: datetime) -> 
                     "end": end.isoformat(),
                     "start_time": start_time.isoformat(),
                 },
+                file_id=report_name,
             )
 
             delete_task_with_id(
