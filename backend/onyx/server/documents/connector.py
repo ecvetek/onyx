@@ -101,12 +101,9 @@ from onyx.db.models import IndexAttempt
 from onyx.db.models import IndexingStatus
 from onyx.db.models import User
 from onyx.db.models import UserGroup__ConnectorCredentialPair
-from onyx.db.search_settings import get_current_search_settings
-from onyx.db.search_settings import get_secondary_search_settings
 from onyx.file_processing.extract_file_text import convert_docx_to_txt
 from onyx.file_store.file_store import get_default_file_store
 from onyx.key_value_store.interface import KvKeyNotFoundError
-from onyx.redis.redis_connector import RedisConnector
 from onyx.server.documents.models import AuthStatus
 from onyx.server.documents.models import AuthUrl
 from onyx.server.documents.models import ConnectorCredentialPairIdentifier
@@ -421,7 +418,27 @@ def extract_zip_metadata(zf: zipfile.ZipFile) -> dict[str, Any]:
     return zip_metadata
 
 
-def upload_files(files: list[UploadFile], db_session: Session) -> FileUploadResponse:
+def is_zip_file(file: UploadFile) -> bool:
+    """
+    Check if the file is a zip file by content type or filename.
+    """
+    return bool(
+        (
+            file.content_type
+            and file.content_type.startswith(
+                (
+                    "application/zip",
+                    "application/x-zip-compressed",  # May be this in Windows
+                    "application/x-zip",
+                    "multipart/x-zip",
+                )
+            )
+        )
+        or (file.filename and file.filename.lower().endswith(".zip"))
+    )
+
+
+def upload_files(files: list[UploadFile]) -> FileUploadResponse:
     for file in files:
         if not file.filename:
             raise HTTPException(status_code=400, detail="File name cannot be empty")
@@ -432,12 +449,13 @@ def upload_files(files: list[UploadFile], db_session: Session) -> FileUploadResp
         return not any(part.startswith(".") for part in normalized_path.split(os.sep))
 
     deduped_file_paths = []
+    deduped_file_names = []
     zip_metadata = {}
     try:
-        file_store = get_default_file_store(db_session)
+        file_store = get_default_file_store()
         seen_zip = False
         for file in files:
-            if file.content_type and file.content_type.startswith("application/zip"):
+            if is_zip_file(file):
                 if seen_zip:
                     raise HTTPException(status_code=400, detail=SEEN_ZIP_DETAIL)
                 seen_zip = True
@@ -463,7 +481,11 @@ def upload_files(files: list[UploadFile], db_session: Session) -> FileUploadResp
                             file_type=mime_type,
                         )
                         deduped_file_paths.append(file_id)
+                        deduped_file_names.append(os.path.basename(file_info))
                 continue
+
+            # For mypy, actual check happens at start of function
+            assert file.filename is not None
 
             # Special handling for docx files - only store the plaintext version
             if file.content_type and file.content_type.startswith(
@@ -471,6 +493,7 @@ def upload_files(files: list[UploadFile], db_session: Session) -> FileUploadResp
             ):
                 docx_file_id = convert_docx_to_txt(file, file_store)
                 deduped_file_paths.append(docx_file_id)
+                deduped_file_names.append(file.filename)
                 continue
 
             # Default handling for all other file types
@@ -481,19 +504,23 @@ def upload_files(files: list[UploadFile], db_session: Session) -> FileUploadResp
                 file_type=file.content_type or "text/plain",
             )
             deduped_file_paths.append(file_id)
+            deduped_file_names.append(file.filename)
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return FileUploadResponse(file_paths=deduped_file_paths, zip_metadata=zip_metadata)
+    return FileUploadResponse(
+        file_paths=deduped_file_paths,
+        file_names=deduped_file_names,
+        zip_metadata=zip_metadata,
+    )
 
 
 @router.post("/admin/connector/file/upload")
 def upload_files_api(
     files: list[UploadFile],
     _: User = Depends(current_curator_or_admin_user),
-    db_session: Session = Depends(get_session),
 ) -> FileUploadResponse:
-    return upload_files(files, db_session)
+    return upload_files(files)
 
 
 @router.get("/admin/connector")
@@ -713,6 +740,9 @@ def get_connector_indexing_status(
     )
     cc_pairs = cast(list[ConnectorCredentialPair], cc_pairs)
     latest_index_attempts = cast(list[IndexAttempt], latest_index_attempts)
+    latest_finished_index_attempts = cast(
+        list[IndexAttempt], latest_finished_index_attempts
+    )
 
     cc_pair_to_latest_index_attempt = {
         (
@@ -770,12 +800,6 @@ def get_connector_indexing_status(
     for cc_pair in cc_pairs:
         connector_to_cc_pair_ids.setdefault(cc_pair.connector_id, []).append(cc_pair.id)
 
-    get_search_settings = (
-        get_secondary_search_settings
-        if secondary_index
-        else get_current_search_settings
-    )
-    search_settings = get_search_settings(db_session)
     for cc_pair in cc_pairs:
         # TODO remove this to enable ingestion API
         if cc_pair.name == "DefaultCCPair":
@@ -787,15 +811,12 @@ def get_connector_indexing_status(
             # This may happen if background deletion is happening
             continue
 
-        in_progress = False
-        if search_settings:
-            redis_connector = RedisConnector(tenant_id, cc_pair.id)
-            redis_connector_index = redis_connector.new_index(search_settings.id)
-            if redis_connector_index.fenced:
-                in_progress = True
-
         latest_index_attempt = cc_pair_to_latest_index_attempt.get(
             (connector.id, credential.id)
+        )
+        in_progress = bool(
+            latest_index_attempt
+            and latest_index_attempt.status == IndexingStatus.IN_PROGRESS
         )
 
         latest_finished_attempt = cc_pair_to_latest_finished_index_attempt.get(
